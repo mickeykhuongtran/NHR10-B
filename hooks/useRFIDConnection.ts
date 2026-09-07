@@ -1,14 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { bleService } from '../services/bleService';
 import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision } from '../types';
+import { parseBatterySnapshot } from '../utils/battery';
+import { formatDeviceDisplayName } from '../utils/deviceIdentity';
+import { validateBleDeviceName } from '../utils/deviceName';
+import { isSettingsError, parseSettingReading } from '../utils/settingsProtocol';
 
-const IDLE_BATTERY_POLL_INTERVAL_MS = 2000;
-const IDLE_BATTERY_TIMEOUT_MS = 6000;
-const SCAN_NO_TAGS_BATTERY_POLL_INTERVAL_MS = 3000;
+const IDLE_BATTERY_POLL_INTERVAL_MS = 5000;
+const IDLE_BATTERY_TIMEOUT_MS = 15000;
+const SCAN_NO_TAGS_BATTERY_POLL_INTERVAL_MS = 5000;
 const SCAN_LIVE_TAGS_BATTERY_POLL_INTERVAL_MS = 5000;
 const BATCH_BATTERY_POLL_INTERVAL_MS = 10000;
 const BATCH_BATTERY_TIMEOUT_MS = 30000;
-const SCAN_ACTIVITY_TIMEOUT_MS = 9000;
+const SCAN_ACTIVITY_TIMEOUT_MS = 15000;
 const HEARTBEAT_CHECK_INTERVAL_MS = 500;
 const TEMPERATURE_POLL_INTERVAL_MS = 5000;
 
@@ -61,6 +65,7 @@ type InventoryMode = 'idle' | 'interactive' | 'batch' | 'batchSaving' | 'locate'
 type SettingsSyncKey = keyof SettingsSyncRevision;
 
 const createSettingsSyncRevision = (): SettingsSyncRevision => ({
+  deviceName: 0,
   power: 0,
   linkProfile: 0,
   qSession: 0,
@@ -99,15 +104,16 @@ export const useRFIDConnection = () => {
     scanParams: { interval: 0, dwell: 0, count: 0 },
     version: '1.0.0',
     temperature: 0,
-    battery: 0,
-    batteryState: 'normal',
+    batterySnapshot: null,
     deviceInfo: '',
+    deviceName: '',
+    deviceCanonicalId: '',
     syncRevision: createSettingsSyncRevision(),
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
-  const addLog = useCallback((message: string, type: LogEntry['type'] = 'info') => {
-    setLogs(prev => [...prev, { timestamp: Date.now(), message, type }].slice(-1000));
+  const addLog = useCallback((message: string, type: LogEntry['type'] = 'info', notice?: LogEntry['notice']) => {
+    setLogs(prev => [...prev, { timestamp: Date.now(), message, type, ...(notice ? { notice } : {}) }].slice(-1000));
   }, []);
 
   const clearLogs = useCallback(() => {
@@ -117,11 +123,25 @@ export const useRFIDConnection = () => {
   const clearDeviceTelemetry = useCallback(() => {
     setSettings(s => ({
       ...s,
-      battery: 0,
-      batteryState: 'normal',
+      batterySnapshot: s.batterySnapshot
+        ? { ...s.batterySnapshot, stale: true }
+        : null,
       temperature: 0,
       deviceInfo: '',
+      deviceName: '',
+      deviceCanonicalId: '',
     }));
+  }, []);
+
+  const resetConnectionTracking = useCallback(() => {
+    lastBatteryHeartbeatRef.current = null;
+    lastDeviceActivityRef.current = null;
+    lastLiveTagsAtRef.current = null;
+    lastBatteryPollAtRef.current = 0;
+    inventoryActiveRef.current = false;
+    inventoryModeRef.current = 'idle';
+    setInventoryActiveState(false);
+    setInventoryModeState('idle');
   }, []);
 
   const markDeviceActivity = useCallback((cmd?: string) => {
@@ -134,7 +154,11 @@ export const useRFIDConnection = () => {
   }, []);
 
   const markBatteryHeartbeat = useCallback(() => {
-    lastBatteryHeartbeatRef.current = Date.now();
+    const now = Date.now();
+    lastBatteryHeartbeatRef.current = now;
+    // Anchor the next poll to the received snapshot as well as to the write.
+    // This keeps every GB exchange at least one firmware refresh period apart.
+    lastBatteryPollAtRef.current = now;
     markDeviceActivity('GB');
   }, [markDeviceActivity]);
 
@@ -153,30 +177,59 @@ export const useRFIDConnection = () => {
 
   const markDeviceOffline = useCallback((reason = 'Device battery heartbeat timeout') => {
     if (heartbeatTimeoutReportedRef.current) return;
+    if (bleService.isIntentionalUnpairPending()) return;
 
     heartbeatTimeoutReportedRef.current = true;
-    lastBatteryHeartbeatRef.current = null;
-    lastDeviceActivityRef.current = null;
-    lastLiveTagsAtRef.current = null;
-    lastBatteryPollAtRef.current = 0;
-    inventoryActiveRef.current = false;
-    inventoryModeRef.current = 'idle';
-    setInventoryActiveState(false);
-    setInventoryModeState('idle');
-    bleService.disconnect();
-    setStatus('disconnected');
-    clearDeviceTelemetry();
-    addLog(reason, 'error');
-  }, [addLog, clearDeviceTelemetry]);
+    resetConnectionTracking();
+    const recoveryStarted = bleService.recoverFromUnexpectedLinkTimeout(reason);
+    if (!recoveryStarted) {
+      setStatus('disconnected');
+      clearDeviceTelemetry();
+      addLog(reason, 'error');
+    }
+  }, [addLog, clearDeviceTelemetry, resetConnectionTracking]);
 
   const handleDataReceived = useCallback((data: any) => {
     markDeviceActivity(data.cmd);
 
     // 3. Settings Responses
     if (data.cmd === 'DI') {
-        const deviceName = typeof data.val === 'string' ? data.val.trim() : '';
+        const canonicalId = typeof data.id === 'string' && /^NHR10-[0-9A-F]{12}$/i.test(data.id.trim())
+          ? data.id.trim().toUpperCase()
+          : '';
+        const displayId = typeof data.display_id === 'string' && /^[0-9A-F]{6}$/i.test(data.display_id.trim())
+          ? data.display_id.trim().toUpperCase()
+          : '';
+        const fallbackName = typeof data.val === 'string' ? data.val.trim() : '';
+        const deviceName = formatDeviceDisplayName(bleService.getDeviceName(), displayId, fallbackName || canonicalId);
         if (deviceName) {
-            setSettings(s => ({ ...s, deviceInfo: deviceName }));
+            setSettings(s => ({
+                ...s,
+                deviceInfo: s.deviceName || deviceName,
+                deviceCanonicalId: canonicalId,
+                ...(typeof data.fw === 'string' && data.fw.trim() ? { version: data.fw.trim() } : {}),
+            }));
+        }
+    }
+    const deviceNameResponseIsError = ['err', 'error'].includes(String(data.status ?? '').toLowerCase()) || data.ok === false;
+    if (
+        (data.cmd === 'GDN' && !deviceNameResponseIsError) ||
+        (data.cmd === 'SDN' && !deviceNameResponseIsError && typeof data.val === 'string')
+    ) {
+        if (typeof data.val !== 'string') {
+            addLog(`${data.cmd} response is missing string val`, 'error');
+        } else {
+            const validation = validateBleDeviceName(data.val);
+            if (!validation.valid) {
+                addLog(`Ignored invalid ${data.cmd} device name: ${validation.error}`, 'error');
+            } else {
+                setSettings(s => ({
+                    ...s,
+                    deviceName: data.val,
+                    deviceInfo: data.val,
+                    syncRevision: bumpSettingsSyncRevision(s, 'deviceName'),
+                }));
+            }
         }
     }
     if (data.cmd === 'GRI') {
@@ -192,14 +245,16 @@ export const useRFIDConnection = () => {
     }
     if (data.cmd === 'GT') setSettings(s => ({ ...s, temperature: data.val }));
     if (data.cmd === 'GB') {
-        markBatteryHeartbeat();
         setStatus(current => current === 'connecting' ? 'connected' : current);
-        if (data.voltage !== undefined) {
-            setSettings(s => ({ ...s, battery: data.voltage, batteryState: data.state }));
+        const batterySnapshot = parseBatterySnapshot(data);
+        if (batterySnapshot) {
+            markBatteryHeartbeat();
+            setSettings(s => ({ ...s, batterySnapshot }));
         } else {
-            setSettings(s => ({ ...s, battery: data.val }));
+            addLog('Ignored malformed GB battery response', 'error');
         }
     }
+    if (isSettingsError(data)) return;
     if (data.cmd === 'GP' || data.cmd === 'SP') {
         const power = parseFiniteNumber(data.val ?? data.power ?? data.pwr);
         if (power !== null) {
@@ -259,8 +314,8 @@ export const useRFIDConnection = () => {
         }
     }
     if (data.cmd === 'GTF' || data.cmd === 'TF' || data.cmd === 'STF') {
-        const val = parseInt(String(data.val));
-        setSettings(prev => ({ ...prev, tagFocus: val === 1, syncRevision: bumpSettingsSyncRevision(prev, 'tagFocus') }));
+        const reading = parseSettingReading('tag-focus', data);
+        if (reading) setSettings(prev => ({ ...prev, tagFocus: reading.val === 1, syncRevision: bumpSettingsSyncRevision(prev, 'tagFocus') }));
     }
     if (data.cmd === 'GF' || data.cmd === 'SF') {
         const regionBand = parseRegionBand(data);
@@ -268,7 +323,37 @@ export const useRFIDConnection = () => {
             setSettings(prev => ({ ...prev, regionBand, syncRevision: bumpSettingsSyncRevision(prev, 'regionBand') }));
         }
     }
-  }, [markBatteryHeartbeat, markDeviceActivity]);
+  }, [addLog, markBatteryHeartbeat, markDeviceActivity]);
+
+  const handleConnectionStatusChange = useCallback((nextStatus: ConnectionStatus, reason?: string) => {
+    if (nextStatus === 'connecting') {
+      setStatus('connecting');
+      return;
+    }
+
+    if (nextStatus === 'connected') {
+      const connectedAt = Date.now();
+      lastBatteryHeartbeatRef.current = connectedAt;
+      lastDeviceActivityRef.current = connectedAt;
+      lastLiveTagsAtRef.current = null;
+      // getSettings() below already queues one GB request for the reconnect.
+      lastBatteryPollAtRef.current = connectedAt;
+      heartbeatTimeoutReportedRef.current = false;
+      setStatus('connected');
+      void bleService.getSettings().catch((error: any) => {
+        addLog(`State sync after reconnect failed: ${error.message}`, 'error');
+      });
+      return;
+    }
+
+    heartbeatTimeoutReportedRef.current = true;
+    resetConnectionTracking();
+    setStatus(nextStatus);
+    clearDeviceTelemetry();
+    if (reason) {
+      addLog(reason, nextStatus === 'error' ? 'error' : 'info');
+    }
+  }, [addLog, clearDeviceTelemetry, resetConnectionTracking]);
 
   const connect = async () => {
     setStatus('connecting');
@@ -288,16 +373,30 @@ export const useRFIDConnection = () => {
       const connectedAt = Date.now();
       lastBatteryHeartbeatRef.current = connectedAt;
       lastDeviceActivityRef.current = connectedAt;
-      const advertisedName = bleService.getDeviceName().trim();
-      if (advertisedName) {
-        setSettings(s => ({ ...s, deviceInfo: advertisedName }));
+      // The initialization sequence below explicitly requests one GB snapshot.
+      lastBatteryPollAtRef.current = connectedAt;
+      const identity = bleService.getDeviceIdentity();
+      const deviceLabel = formatDeviceDisplayName(
+        bleService.getDeviceName(),
+        identity?.displayId,
+        identity?.canonicalId,
+      );
+      if (deviceLabel) {
+        setSettings(s => ({
+          ...s,
+          deviceInfo: deviceLabel,
+          deviceCanonicalId: identity?.canonicalId ?? '',
+          ...(identity?.firmware ? { version: identity.firmware } : {}),
+        }));
       }
       setStatus('connected');
-      addLog('Connected to NHR-10', 'info');
+      addLog(`Connected to ${deviceLabel || 'NHR-10'}`, 'info');
       
       // Init Settings
       await bleService.getDeviceInfo();
+      await bleService.getConfiguredDeviceName();
       await bleService.getInfo();
+      lastBatteryPollAtRef.current = Date.now();
       await bleService.getBattery();
       await bleService.getPower();
       await bleService.getProfile();
@@ -308,6 +407,10 @@ export const useRFIDConnection = () => {
       await bleService.getTemperature();
 
     } catch (e: any) {
+      if (bleService.isIntentionalUnpairPending()) {
+        addLog('Device unpair is in progress; waiting for peripheral disconnect.', 'info');
+        return;
+      }
       lastBatteryHeartbeatRef.current = null;
       lastDeviceActivityRef.current = null;
       lastLiveTagsAtRef.current = null;
@@ -325,14 +428,7 @@ export const useRFIDConnection = () => {
 
   const disconnect = () => {
     heartbeatTimeoutReportedRef.current = true;
-    lastBatteryHeartbeatRef.current = null;
-    lastDeviceActivityRef.current = null;
-    lastLiveTagsAtRef.current = null;
-    lastBatteryPollAtRef.current = 0;
-    inventoryActiveRef.current = false;
-    inventoryModeRef.current = 'idle';
-    setInventoryActiveState(false);
-    setInventoryModeState('idle');
+    resetConnectionTracking();
     bleService.disconnect();
     setStatus('disconnected');
     clearDeviceTelemetry();
@@ -349,8 +445,8 @@ export const useRFIDConnection = () => {
     return hasRecentLiveTags ? SCAN_LIVE_TAGS_BATTERY_POLL_INTERVAL_MS : SCAN_NO_TAGS_BATTERY_POLL_INTERVAL_MS;
   }, []);
 
-  // Adaptive heartbeat. During inventory, live_tags/FF01 traffic counts as device activity
-  // and GB is throttled to avoid stressing BLE while tag traffic is dense.
+  // GB follows the firmware's five-second slow-filter cadence. Batch mode polls
+  // less often, and batch saving suspends polling to protect the transfer path.
   useEffect(() => {
     let heartbeatPollId: number | null = null;
     let temperaturePollId: number | null = null;
@@ -362,9 +458,6 @@ export const useRFIDConnection = () => {
         void bleService.getBattery().catch(e => console.error("Battery poll failed", e));
       };
 
-      if (getBatteryPollInterval() !== null) {
-        pollBattery();
-      }
       heartbeatPollId = window.setInterval(() => {
         const batteryPollInterval = getBatteryPollInterval();
         if (batteryPollInterval !== null && Date.now() - lastBatteryPollAtRef.current >= batteryPollInterval) {
@@ -395,25 +488,21 @@ export const useRFIDConnection = () => {
         return;
       }
 
-      if (mode === 'batch') {
-        const lastHeartbeat = lastBatteryHeartbeatRef.current;
-        if (!lastHeartbeat || now - lastHeartbeat > BATCH_BATTERY_TIMEOUT_MS) {
-          markDeviceOffline('Device offline: no batch battery update for 30s');
-        }
-        return;
-      }
-
-      if (inventoryActiveRef.current) {
-        const lastActivity = lastDeviceActivityRef.current;
-        if (!lastActivity || now - lastActivity > SCAN_ACTIVITY_TIMEOUT_MS) {
-          markDeviceOffline('Device offline: no FF01 activity for 9s');
-        }
-        return;
-      }
-
       const lastHeartbeat = lastBatteryHeartbeatRef.current;
-      if (!lastHeartbeat || now - lastHeartbeat > IDLE_BATTERY_TIMEOUT_MS) {
-        markDeviceOffline('Device offline: no battery update for 6s');
+      const batteryTimeoutMs = mode === 'batch' ? BATCH_BATTERY_TIMEOUT_MS : IDLE_BATTERY_TIMEOUT_MS;
+      if (!lastHeartbeat || now - lastHeartbeat > batteryTimeoutMs) {
+        setSettings(current => {
+          const snapshot = current.batterySnapshot;
+          if (!snapshot || snapshot.stale) return current;
+          return { ...current, batterySnapshot: { ...snapshot, stale: true } };
+        });
+      }
+
+      const activityTimeoutMs = mode === 'batch' ? BATCH_BATTERY_TIMEOUT_MS : SCAN_ACTIVITY_TIMEOUT_MS;
+      const lastActivity = lastDeviceActivityRef.current;
+      if (!lastActivity || now - lastActivity > activityTimeoutMs) {
+        const context = mode === 'batch' ? 'batch' : inventoryActiveRef.current ? 'scan' : 'idle';
+        markDeviceOffline(`Device offline: no FF01 activity in ${context} mode for ${activityTimeoutMs / 1000}s`);
       }
     }, HEARTBEAT_CHECK_INTERVAL_MS);
 
@@ -429,6 +518,7 @@ export const useRFIDConnection = () => {
     clearLogs,
     connect,
     disconnect,
+    handleConnectionStatusChange,
     setInventoryActive,
     handleDataReceived // Exported to be combined with other handlers
   };

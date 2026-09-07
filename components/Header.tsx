@@ -10,7 +10,13 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ status, settings, onConnect, onDisconnect }) => {
-  const getBatteryColor = (level: number) => {
+  const batterySnapshot = settings.batterySnapshot;
+  const batteryPercent = batterySnapshot && !batterySnapshot.stale
+    ? batterySnapshot.visualPercent
+    : null;
+
+  const getBatteryColor = (level: number | null) => {
+    if (level === null) return 'text-slate-500';
     if (level > 50) return 'text-green-500';
     if (level > 20) return 'text-yellow-500';
     return 'text-red-500';
@@ -42,8 +48,8 @@ export const Header: React.FC<HeaderProps> = ({ status, settings, onConnect, onD
               <span>{settings.temperature}°C</span>
             </div>
             <div className="flex items-center gap-1 text-sm font-mono bg-slate-800 px-2 py-1 rounded">
-              <Battery size={16} className={getBatteryColor(settings.battery)} />
-              <span>{settings.battery}%</span>
+              <Battery size={16} className={getBatteryColor(batteryPercent)} />
+              <span>{batteryPercent !== null ? `${batteryPercent}%` : '--%'}</span>
             </div>
           </>
         )}

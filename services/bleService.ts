@@ -1,4 +1,5 @@
 import { ConnectionStatus } from '../types';
+import { assertValidBleDeviceName } from '../utils/deviceName';
 
 // --- Web Bluetooth Type Definitions ---
 interface BluetoothDevice extends EventTarget {
@@ -48,6 +49,28 @@ const LIVE_TAGS_VERSION = 1;
 const LIVE_TAGS_TYPE = 1;
 const LIVE_TAGS_DELIVERY_INTERVAL_MS = 100;
 const COMMAND_WRITE_GAP_MS = 85;
+const RECONNECT_DELAYS_MS = [500, 1000, 2000, 4000, 8000] as const;
+const IDENTITY_RESPONSE_TIMEOUT_MS = 3000;
+const UNPAIR_ACK_DEADLINE_MS = 500;
+const UNPAIR_ACK_RETRY_DELAYS_MS = [0, 20, 40, 80, 120] as const;
+const PERSISTED_DEVICE_STORAGE_KEYS = [
+  'lastConnectedDevice',
+  'nhr10.lastConnectedDevice',
+  'nhr10:lastConnectedDevice',
+  'autoConnectDevice',
+  'nhr10.autoConnectDevice',
+  'nhr10:autoConnectDevice',
+] as const;
+
+export type BleDeviceIdentity = {
+  canonicalId: string;
+  displayId: string;
+  advertisedName: string;
+  model: string;
+  firmware: string;
+  hardware: string;
+  manufacturer: string;
+};
 
 type LiveTagsItem = [string, number, number, number];
 type LiveTagsPayload = {
@@ -61,6 +84,12 @@ type DataCallback = (data: any) => void;
 type LogCallback = (msg: string, type: 'info' | 'error' | 'rx' | 'tx') => void;
 type FileTransferEvent = 'request' | 'start' | 'progress' | 'complete' | 'busy' | 'error';
 type FileTransferCallback = (event: FileTransferEvent, data?: any) => void;
+type ConnectionCallback = (status: ConnectionStatus, reason?: string) => void;
+type PendingIdentityVerification = {
+  resolve: (identity: BleDeviceIdentity | null) => void;
+  reject: (error: Error) => void;
+  timeoutId: number;
+};
 type RequestDeviceOptions = {
   acceptAllDevices?: boolean;
   filters?: Array<{ namePrefix?: string; services?: string[] }>;
@@ -88,6 +117,13 @@ class BLEService {
   private onDataReceived: DataCallback | null = null;
   private onLog: LogCallback | null = null;
   private onFileTransfer: FileTransferCallback | null = null;
+  private onConnectionStatus: ConnectionCallback | null = null;
+  private identity: BleDeviceIdentity | null = null;
+  private pendingIdentityVerification: PendingIdentityVerification | null = null;
+  private shouldReconnect = false;
+  private reconnectGeneration = 0;
+  private cancelReconnectDelay: (() => void) | null = null;
+  private intentionalUnpair = false;
 
   // File Transfer State
   private isFileTransferring = false;
@@ -99,6 +135,7 @@ class BLEService {
 
   // Command Queue to prevent GATT collisions
   private commandQueue: Promise<void> = Promise.resolve();
+  private commandQueueGeneration = 0;
   private lastCommandWriteAt = 0;
   private acceptLiveTags = false;
   private liveTagsFlushTimer: number | null = null;
@@ -108,17 +145,21 @@ class BLEService {
 
   // Bound handler for file notifications
   private boundFileHandler = this.handleFileNotification.bind(this);
+  private boundCmdHandler = this.handleCmdNotification.bind(this);
+  private boundDisconnectHandler = this.handleDisconnect.bind(this);
 
   constructor() {}
 
   setCallbacks(
     onData: DataCallback,
     onLog: LogCallback,
-    onFileTransfer: FileTransferCallback
+    onFileTransfer: FileTransferCallback,
+    onConnectionStatus?: ConnectionCallback,
   ) {
     this.onDataReceived = onData;
     this.onLog = onLog;
     this.onFileTransfer = onFileTransfer;
+    this.onConnectionStatus = onConnectionStatus ?? null;
   }
 
   async connect(): Promise<void> {
@@ -130,31 +171,21 @@ class BLEService {
     this.log('Requesting device...', 'info');
 
     try {
-      this.device = await this.requestDevice(nav);
+      this.disconnect();
+      this.intentionalUnpair = false;
+      const connectionGeneration = this.reconnectGeneration;
+      const selectedDevice = await this.requestDevice(nav);
+      if (connectionGeneration !== this.reconnectGeneration) {
+        throw new Error('BLE connection request was cancelled');
+      }
 
-      this.device!.addEventListener('gattserverdisconnected', this.handleDisconnect.bind(this));
-
-      this.log(`Connecting to ${this.device!.name}...`, 'info');
-      this.server = await this.device!.gatt!.connect();
-
-      this.log('Getting Service...', 'info');
-      this.service = await this.server.getPrimaryService(SERVICE_UUID);
-
-      this.log('Getting Characteristics...', 'info');
-      this.charCmd = await this.service.getCharacteristic(CHAR_CMD_UUID);
-      this.charFileReq = await this.service.getCharacteristic(CHAR_FILE_REQ_UUID);
-      this.charFileData = await this.service.getCharacteristic(CHAR_FILE_DATA_UUID);
-      this.log(`FF01 properties: ${this.formatCharacteristicProperties(this.charCmd)}`, 'info');
-
-      // Setup Notifications for Commands/Tags
-      this.log('Starting Notifications...', 'info');
-      await this.charCmd.startNotifications();
-      this.charCmd.addEventListener('characteristicvaluechanged', this.handleCmdNotification.bind(this));
-
-      // Note: File Data notifications are now started in requestFileTransfer()
-
-      this.log('Connected and ready.', 'info');
+      this.device = selectedDevice;
+      this.device.addEventListener('gattserverdisconnected', this.boundDisconnectHandler);
+      await this.connectGatt(false, connectionGeneration);
     } catch (error: any) {
+      if (!this.intentionalUnpair) {
+        this.disconnect();
+      }
       this.log(`Connection failed: ${error.message}`, 'error');
       throw error;
     }
@@ -163,6 +194,8 @@ class BLEService {
   private async requestDevice(nav: any): Promise<BluetoothDevice> {
     const filteredOptions: RequestDeviceOptions = {
       filters: [
+        { services: [SERVICE_UUID] },
+        { namePrefix: 'NHR10-' },
         { namePrefix: 'NHR-10' },
         { namePrefix: 'Nextwaves' },
       ],
@@ -187,29 +220,301 @@ class BLEService {
   }
 
   disconnect() {
-    if (this.device && this.device.gatt?.connected) {
-      this.device.gatt.disconnect();
+    const device = this.device;
+    this.shouldReconnect = false;
+    this.reconnectGeneration += 1;
+    this.cancelScheduledReconnect();
+    device?.removeEventListener('gattserverdisconnected', this.boundDisconnectHandler);
+    if (device?.gatt?.connected) {
+      device.gatt.disconnect();
     }
     this.clearConnectionState();
+    this.intentionalUnpair = false;
   }
 
-  handleDisconnect() {
-    if (!this.device && !this.server && !this.service && !this.charCmd) return;
-    this.log('Device disconnected.', 'error');
-    this.clearConnectionState();
+  private async connectGatt(isReconnect: boolean, connectionGeneration: number): Promise<void> {
+    const device = this.device;
+    if (!device?.gatt) {
+      throw new Error('Selected device does not expose a GATT server.');
+    }
+
+    this.log(`${isReconnect ? 'Reconnecting' : 'Connecting'} to ${device.name ?? 'NHR-10'}...`, 'info');
+    this.server = await device.gatt.connect();
+    this.assertConnectionAttemptIsCurrent(device, connectionGeneration);
+
+    this.log('Getting Service...', 'info');
+    this.service = await this.server.getPrimaryService(SERVICE_UUID);
+    this.assertConnectionAttemptIsCurrent(device, connectionGeneration);
+
+    this.log('Getting Characteristics...', 'info');
+    this.charCmd = await this.service.getCharacteristic(CHAR_CMD_UUID);
+    this.charFileReq = await this.service.getCharacteristic(CHAR_FILE_REQ_UUID);
+    this.charFileData = await this.service.getCharacteristic(CHAR_FILE_DATA_UUID);
+    this.assertConnectionAttemptIsCurrent(device, connectionGeneration);
+    this.log(`FF01 properties: ${this.formatCharacteristicProperties(this.charCmd)}`, 'info');
+
+    this.log('Starting Notifications...', 'info');
+    await this.charCmd.startNotifications();
+    this.charCmd.addEventListener('characteristicvaluechanged', this.boundCmdHandler);
+    this.assertConnectionAttemptIsCurrent(device, connectionGeneration);
+
+    await this.requestAndValidateIdentity(device);
+    this.assertConnectionAttemptIsCurrent(device, connectionGeneration);
+    this.shouldReconnect = true;
+    this.log(isReconnect ? 'Reconnected and ready.' : 'Connected and ready.', 'info');
+  }
+
+  private handleDisconnect(event: Event) {
+    const disconnectedDevice = event.target as BluetoothDevice;
+    if (disconnectedDevice !== this.device) return;
+
+    const shouldAttemptReconnect = this.shouldReconnect;
+    this.shouldReconnect = false;
+    this.cancelScheduledReconnect();
+    this.clearGattState();
+
+    if (this.intentionalUnpair) {
+      this.intentionalUnpair = false;
+      this.clearConnectionState();
+      this.log('Device-initiated unpair completed.', 'info');
+      this.onConnectionStatus?.('disconnected', 'Device unpaired. Scan and select it again to reconnect.');
+      return;
+    }
+
+    if (!shouldAttemptReconnect) {
+      this.clearConnectionState();
+      this.onConnectionStatus?.('disconnected', 'BLE connection closed');
+      return;
+    }
+
+    this.log('Device disconnected unexpectedly.', 'error');
+    this.onConnectionStatus?.('disconnected', 'BLE link lost');
+
+    const reconnectGeneration = ++this.reconnectGeneration;
+    void this.reconnectDevice(disconnectedDevice, reconnectGeneration);
+  }
+
+  private async reconnectDevice(device: BluetoothDevice, reconnectGeneration: number): Promise<void> {
+    let lastError = 'device unavailable';
+
+    for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt += 1) {
+      const delayCompleted = await this.waitForReconnectDelay(RECONNECT_DELAYS_MS[attempt]);
+      if (!delayCompleted || this.device !== device || this.reconnectGeneration !== reconnectGeneration) return;
+
+      this.onConnectionStatus?.('connecting', `Reconnect attempt ${attempt + 1}/${RECONNECT_DELAYS_MS.length}`);
+      try {
+        await this.connectGatt(true, reconnectGeneration);
+        if (this.device !== device || this.reconnectGeneration !== reconnectGeneration) return;
+        this.onConnectionStatus?.('connected');
+        return;
+      } catch (error: any) {
+        if (this.intentionalUnpair || this.device !== device || this.reconnectGeneration !== reconnectGeneration) return;
+        lastError = String(error?.message ?? error ?? lastError);
+        this.clearGattState();
+        this.log(`Reconnect attempt ${attempt + 1} failed: ${lastError}`, 'error');
+      }
+    }
+
+    if (this.device !== device || this.reconnectGeneration !== reconnectGeneration) return;
+    this.disconnect();
+    this.onConnectionStatus?.('error', `BLE reconnect failed: ${lastError}`);
+  }
+
+  private assertConnectionAttemptIsCurrent(device: BluetoothDevice, connectionGeneration: number) {
+    if (
+      this.intentionalUnpair ||
+      this.device !== device ||
+      this.reconnectGeneration !== connectionGeneration
+    ) {
+      throw new Error('BLE connection attempt was cancelled');
+    }
+  }
+
+  private waitForReconnectDelay(delayMs: number): Promise<boolean> {
+    this.cancelScheduledReconnect();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (completed: boolean) => {
+        if (settled) return;
+        settled = true;
+        this.cancelReconnectDelay = null;
+        resolve(completed);
+      };
+      const timeoutId = window.setTimeout(() => finish(true), delayMs);
+      this.cancelReconnectDelay = () => {
+        window.clearTimeout(timeoutId);
+        finish(false);
+      };
+    });
+  }
+
+  private cancelScheduledReconnect() {
+    const cancel = this.cancelReconnectDelay;
+    this.cancelReconnectDelay = null;
+    cancel?.();
+  }
+
+  private async requestAndValidateIdentity(device: BluetoothDevice): Promise<void> {
+    if (this.pendingIdentityVerification) {
+      throw new Error('NHR-10 identity verification failed: another verification is already active');
+    }
+
+    const advertisedName = device.name?.trim() ?? '';
+    const requiresCanonicalIdentity = this.requiresCanonicalIdentity(advertisedName);
+    const identityPromise = new Promise<BleDeviceIdentity | null>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        if (!this.pendingIdentityVerification) return;
+
+        if (requiresCanonicalIdentity) {
+          this.settleIdentityVerification(
+            null,
+            new Error('NHR-10 identity verification failed: DI response timed out'),
+          );
+          return;
+        }
+
+        this.log('Legacy device did not return a verifiable DI identity; continuing in compatibility mode.', 'info');
+        this.settleIdentityVerification(null);
+      }, IDENTITY_RESPONSE_TIMEOUT_MS);
+
+      this.pendingIdentityVerification = { resolve, reject, timeoutId };
+    });
+
+    try {
+      await this.sendCommand({ cmd: 'DI' });
+    } catch (error: any) {
+      this.settleIdentityVerification(
+        null,
+        new Error(`NHR-10 identity verification failed: unable to request DI: ${error.message}`),
+      );
+    }
+
+    await identityPromise;
+  }
+
+  private settleIdentityVerification(identity: BleDeviceIdentity | null, error?: Error): boolean {
+    const pending = this.pendingIdentityVerification;
+    if (!pending) return false;
+
+    window.clearTimeout(pending.timeoutId);
+    this.pendingIdentityVerification = null;
+    if (error) pending.reject(error);
+    else pending.resolve(identity);
+    return true;
+  }
+
+  private parseDeviceIdentityResponse(data: any): BleDeviceIdentity | null {
+    const advertisedName = this.device?.name?.trim() ?? '';
+    const requiresCanonicalIdentity = this.requiresCanonicalIdentity(advertisedName);
+    if (typeof data?.id !== 'string' || data.id.trim() === '') {
+      if (requiresCanonicalIdentity) {
+        throw new Error('DI response is missing Canonical ID');
+      }
+
+      this.log('Legacy DI response has no Canonical ID; using compatibility mode.', 'info');
+      return null;
+    }
+
+    const canonicalId = data.id.trim().toUpperCase();
+    if (!/^NHR10-[0-9A-F]{12}$/.test(canonicalId)) {
+      throw new Error(`DI returned invalid Canonical ID "${data.id}"`);
+    }
+
+    const displayId = canonicalId.slice(-6);
+    const responseDisplayId = typeof data.display_id === 'string'
+      ? data.display_id.trim().toUpperCase()
+      : displayId;
+    if (responseDisplayId !== displayId) {
+      throw new Error(`DI Display ID ${responseDisplayId} does not match ${canonicalId}`);
+    }
+    if (this.identity && this.identity.canonicalId !== canonicalId) {
+      throw new Error(`DI identity ${canonicalId} does not match ${this.identity.canonicalId}`);
+    }
+
+    const advertisedMatch = /^NHR10-([0-9A-F]{6})$/i.exec(advertisedName);
+    if (advertisedMatch && advertisedMatch[1].toUpperCase() !== displayId) {
+      throw new Error(`DI identity ${canonicalId} does not match advertised name ${advertisedName}`);
+    }
+
+    const model = typeof data.val === 'string' && data.val.trim() ? data.val.trim() : 'NHR-10';
+    if (model !== 'NHR-10') {
+      throw new Error(`DI returned unexpected model "${model}"`);
+    }
+
+    return {
+      canonicalId,
+      displayId,
+      advertisedName,
+      model,
+      firmware: typeof data.fw === 'string' ? data.fw.trim() : this.identity?.firmware ?? '',
+      hardware: typeof data.hw === 'string' ? data.hw.trim() : this.identity?.hardware ?? '',
+      manufacturer: this.identity?.manufacturer ?? '',
+    };
+  }
+
+  private requiresCanonicalIdentity(advertisedName: string): boolean {
+    if (this.identity !== null) return true;
+
+    // A configured GAP name no longer carries the NHR10-xxxxxx suffix. Keep
+    // DI mandatory for custom/service-selected devices; compatibility mode is
+    // reserved for the explicitly supported legacy advertising families.
+    return !/^(?:NHR-10|Nextwaves(?:_Scanner_V3)?)$/i.test(advertisedName);
+  }
+
+  private rejectIdentity(reason: string) {
+    const message = `NHR-10 identity verification failed: ${reason}`;
+    this.log(message, 'error');
+    this.onConnectionStatus?.('error', message);
+    this.disconnect();
   }
 
   getDeviceName(): string {
     return this.device?.name ?? '';
   }
 
+  getDeviceIdentity(): BleDeviceIdentity | null {
+    return this.identity ? { ...this.identity } : null;
+  }
+
+  isIntentionalUnpairPending(): boolean {
+    return this.intentionalUnpair;
+  }
+
+  recoverFromUnexpectedLinkTimeout(reason = 'BLE link timeout'): boolean {
+    if (this.intentionalUnpair || !this.shouldReconnect || !this.device?.gatt) return false;
+
+    this.log(`${reason}; restarting the bounded reconnect policy.`, 'error');
+    if (this.device.gatt.connected) {
+      // Keep the disconnect listener installed: the resulting event follows
+      // the same bounded reconnect path as a radio/link-layer loss.
+      this.device.gatt.disconnect();
+      return true;
+    }
+
+    return false;
+  }
+
   private clearConnectionState() {
+    this.device?.removeEventListener('gattserverdisconnected', this.boundDisconnectHandler);
+    this.clearGattState();
+    this.shouldReconnect = false;
+    this.identity = null;
+    this.device = null;
+  }
+
+  private clearGattState() {
+    this.settleIdentityVerification(
+      null,
+      new Error('NHR-10 identity verification failed: BLE link closed before DI verification completed'),
+    );
+    this.charCmd?.removeEventListener('characteristicvaluechanged', this.boundCmdHandler);
+    this.charFileData?.removeEventListener('characteristicvaluechanged', this.boundFileHandler);
     this.resetFileState();
+    this.commandQueueGeneration += 1;
     this.commandQueue = Promise.resolve();
     this.lastCommandWriteAt = 0;
     this.acceptLiveTags = false;
     this.clearPendingLiveTags();
-    this.device = null;
     this.server = null;
     this.service = null;
     this.charCmd = null;
@@ -329,6 +634,32 @@ class BLEService {
     try {
       const data = JSON.parse(value);
 
+      if (data?.cmd === 'UQ' && data?.v === 1) {
+        this.handleDeviceUnpairRequest(data, value);
+        return;
+      }
+
+      if (data.cmd === 'DI') {
+        const hasPendingVerification = this.pendingIdentityVerification !== null;
+        try {
+          const identity = this.parseDeviceIdentityResponse(data);
+          if (identity) {
+            this.identity = identity;
+            this.log(`Verified device identity via DI: ${identity.canonicalId}`, 'info');
+          }
+          this.settleIdentityVerification(identity);
+        } catch (error: any) {
+          const message = String(error?.message ?? error ?? 'invalid DI response');
+          const verificationError = new Error(`NHR-10 identity verification failed: ${message}`);
+          if (hasPendingVerification) {
+            this.settleIdentityVerification(null, verificationError);
+          } else {
+            this.rejectIdentity(message);
+          }
+          return;
+        }
+      }
+
       if (data.cmd === 'live_tags') {
         if (!this.acceptLiveTags) {
           return;
@@ -353,6 +684,100 @@ class BLEService {
       }
     } catch (e) {
       this.log(`RX (Invalid JSON): ${value}`, 'rx');
+    }
+  }
+
+  private handleDeviceUnpairRequest(data: { cmd: 'UQ'; v: 1 }, rawValue: string) {
+    if (this.intentionalUnpair) {
+      this.log('RX: duplicate device unpair request ignored while ACK is pending', 'rx');
+      return;
+    }
+
+    const requestedAt = performance.now();
+    const queueToDrain = this.commandQueue;
+    this.intentionalUnpair = true;
+    this.shouldReconnect = false;
+    this.reconnectGeneration += 1;
+    this.cancelScheduledReconnect();
+    this.settleIdentityVerification(
+      null,
+      new Error('NHR-10 identity verification cancelled by device unpair'),
+    );
+    this.suspendLiveTags();
+    this.clearPersistedLastConnectedDevice();
+
+    // Invalidate queued commands before issuing UA. An already executing Web
+    // Bluetooth operation cannot be aborted, so the urgent writer retries as
+    // soon as that operation drains instead of waiting behind the old queue.
+    this.commandQueueGeneration += 1;
+    this.commandQueue = Promise.resolve();
+    const ackPromise = this.writeDeviceUnpairAck(requestedAt, queueToDrain);
+
+    // ACK invocation above happens before any logging or React callback.
+    this.log(`RX: ${rawValue}`, 'rx');
+    this.onDataReceived?.(data);
+    void ackPromise;
+  }
+
+  private async writeDeviceUnpairAck(requestedAt: number, queueToDrain: Promise<void>) {
+    const characteristic = this.charCmd;
+    if (!characteristic || typeof characteristic.writeValueWithResponse !== 'function') {
+      this.log('Unable to acknowledge device unpair: FF01 write-with-response is unavailable', 'error');
+      return;
+    }
+
+    const payloadText = JSON.stringify({ cmd: 'UA', v: 1 });
+    const payload = new TextEncoder().encode(payloadText);
+    let lastError = 'unknown GATT write error';
+
+    for (let attempt = 0; attempt < UNPAIR_ACK_RETRY_DELAYS_MS.length; attempt += 1) {
+      const elapsedBeforeAttempt = performance.now() - requestedAt;
+      if (elapsedBeforeAttempt >= UNPAIR_ACK_DEADLINE_MS) break;
+
+      const retryDelay = UNPAIR_ACK_RETRY_DELAYS_MS[attempt];
+      if (retryDelay > 0) {
+        await Promise.race([
+          queueToDrain.catch(() => undefined),
+          wait(Math.min(retryDelay, UNPAIR_ACK_DEADLINE_MS - elapsedBeforeAttempt)),
+        ]);
+      }
+
+      if (!this.intentionalUnpair || !this.device?.gatt?.connected) break;
+
+      try {
+        await characteristic.writeValueWithResponse(payload);
+        const elapsedMs = Math.round(performance.now() - requestedAt);
+        this.lastCommandWriteAt = Date.now();
+        this.log(`TX (writeWithResponse, ${payload.byteLength}B): ${payloadText}`, 'tx');
+        this.log(`App acknowledged device-initiated unpair in ${elapsedMs} ms`, 'info');
+        if (elapsedMs >= UNPAIR_ACK_DEADLINE_MS) {
+          this.log(`Unpair ACK exceeded ${UNPAIR_ACK_DEADLINE_MS} ms deadline`, 'error');
+        }
+        return;
+      } catch (error: any) {
+        lastError = String(error?.message ?? error ?? lastError);
+      }
+    }
+
+    const elapsedMs = Math.round(performance.now() - requestedAt);
+    this.log(`Device unpair ACK failed after ${elapsedMs} ms: ${lastError}`, 'error');
+  }
+
+  private clearPersistedLastConnectedDevice() {
+    const clearStorage = (storage: Storage) => {
+      PERSISTED_DEVICE_STORAGE_KEYS.forEach((key) => storage.removeItem(key));
+    };
+
+    try {
+      clearStorage(window.localStorage);
+    } catch {
+      // Storage can be unavailable in private/restricted browser contexts.
+    }
+
+    try {
+      clearStorage(window.sessionStorage);
+    } catch {
+      // Session storage is best-effort; reconnect is also disabled in memory.
     }
   }
 
@@ -652,6 +1077,13 @@ class BLEService {
   // --- Command Helpers ---
 
   async getDeviceInfo() { return this.sendCommand({ cmd: 'DI' }); }
+  async getConfiguredDeviceName() { return this.sendCommand({ cmd: 'GDN' }); }
+  async setConfiguredDeviceName(name: string) {
+    assertValidBleDeviceName(name);
+    // Passing an object to JSON.stringify in sendCommand preserves quotes,
+    // backslashes, and other legal JSON characters without manual escaping.
+    return this.sendCommand({ cmd: 'SDN', val: name });
+  }
   async getInfo() { return this.sendCommand({ cmd: 'GRI' }); }
   async getPower() { return this.sendCommand({ cmd: 'GP' }); }
   async getProfile() { return this.sendCommand({ cmd: 'GLP' }); }
@@ -755,19 +1187,24 @@ class BLEService {
   // Queue commands to ensure they are serialized
   async sendCommand(command: object): Promise<void> {
     if (!this.charCmd) throw new Error('Not connected');
+    if (this.intentionalUnpair) return;
     
     const str = JSON.stringify(command);
     const encoder = new TextEncoder();
     const data = encoder.encode(str);
+    const queueGeneration = this.commandQueueGeneration;
 
     // Append to queue. Recover from previous write failures so reconnects are not poisoned.
     this.commandQueue = this.commandQueue.catch(() => undefined).then(async () => {
       try {
+        if (queueGeneration !== this.commandQueueGeneration || this.intentionalUnpair) return;
         if (this.charCmd) {
           const elapsedSinceLastWrite = Date.now() - this.lastCommandWriteAt;
           if (elapsedSinceLastWrite < COMMAND_WRITE_GAP_MS) {
             await wait(COMMAND_WRITE_GAP_MS - elapsedSinceLastWrite);
           }
+
+          if (queueGeneration !== this.commandQueueGeneration || this.intentionalUnpair) return;
 
           const mode = await this.writeCharacteristicValue(this.charCmd, data);
           this.lastCommandWriteAt = Date.now();
@@ -786,6 +1223,7 @@ class BLEService {
   async getSettings(): Promise<void> {
     // These will be queued automatically by sendCommand
     await this.sendCommand({ cmd: 'DI' });
+    await this.sendCommand({ cmd: 'GDN' });
     await this.sendCommand({ cmd: 'GRI' });
     await this.sendCommand({ cmd: 'GB' });
     await this.sendCommand({ cmd: 'GT' });
@@ -808,6 +1246,7 @@ class BLEService {
     }
 
     try {
+        const operationGeneration = this.commandQueueGeneration;
         this.log('Requesting batch file...', 'info');
         this.resetFileState();
         this.isFileTransferring = true;
@@ -816,12 +1255,21 @@ class BLEService {
         if (!this.charFileData) throw new Error('File Data Characteristic not found');
         
         await this.charFileData.startNotifications();
+        if (this.intentionalUnpair || operationGeneration !== this.commandQueueGeneration) {
+          this.resetFileState();
+          return;
+        }
         this.charFileData.addEventListener('characteristicvaluechanged', this.boundFileHandler);
         
         if (this.onFileTransfer) this.onFileTransfer('request');
 
         // Step 3: Write "send_file" to Control Characteristic
         if (!this.charFileReq) throw new Error('File Control Characteristic not found');
+        if (this.intentionalUnpair || operationGeneration !== this.commandQueueGeneration) {
+          this.resetFileState();
+          this.charFileData.removeEventListener('characteristicvaluechanged', this.boundFileHandler);
+          return;
+        }
         
         const encoder = new TextEncoder();
         const command = encoder.encode('send_file');

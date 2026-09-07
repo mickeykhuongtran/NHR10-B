@@ -63,7 +63,8 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
   const [scanStoppedAt, setScanStoppedAt] = useState<number | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
   const [stats, setStats] = useState<ScanStats>(DEFAULT_SCAN_STATS);
-  const [removeStaleTags, setRemoveStaleTags] = useState(true);
+  // Keep the inventory complete by default. Stale-tag hiding is an opt-in display filter.
+  const [removeStaleTags, setRemoveStaleTags] = useState(false);
   const [staleRemoveMs, setStaleRemoveMsState] = useState(DEFAULT_TAG_REMOVE_MS);
   const tagsMap = useRef<Map<string, Tag>>(new Map());
   const rafRef = useRef<number | null>(null);

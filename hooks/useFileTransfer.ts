@@ -12,7 +12,7 @@ export const useFileTransfer = (addLog: (msg: string, type: 'info' | 'error' | '
   const [transferStatus, setTransferStatus] = useState<FileTransferStatus>('idle');
   const [historyData, setHistoryData] = useState<BatchHistoryRecord[]>([]);
   const busyRetryCountRef = useRef(0);
-  const retryTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
 
   const clearRetryTimer = useCallback(() => {
     if (retryTimerRef.current !== null) {

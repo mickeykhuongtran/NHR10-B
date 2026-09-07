@@ -6,6 +6,8 @@ import { useRFIDConnection } from './hooks/useRFIDConnection';
 import { useScanLogic } from './hooks/useScanLogic';
 import { useLocateLogic } from './hooks/useLocateLogic';
 import { useFileTransfer } from './hooks/useFileTransfer';
+import { useSettingsActions } from './hooks/useSettingsActions';
+import { SettingsRequest } from './utils/settingsProtocol';
 
 const DEFAULT_BATCH_SAVE_INFO: BatchSaveInfo = {
   state: 'idle',
@@ -31,9 +33,50 @@ const App: React.FC = () => {
   // --- Operation State (Write) ---
   const [writeStatus, setWriteStatus] = useState<WriteStatus>('idle');
   const [writeMessage, setWriteMessage] = useState('');
+  const writeAttemptRef = useRef(0);
+  const pendingWriteRef = useRef<number | null>(null);
+  const [commandPending, setCommandPending] = useState(false);
+  const commandPendingRef = useRef(false);
   const [batchSaveInfo, setBatchSaveInfo] = useState<BatchSaveInfo>(DEFAULT_BATCH_SAVE_INFO);
-  const batchSavingTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const batchSavingTimerRef = useRef<number | null>(null);
   const isBatchSaving = batchSaveInfo.state === 'saving';
+  const settingsActions = useSettingsActions(connection.addLog, connection.status);
+
+  const runOperation = async (action: () => Promise<void>) => {
+    if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() || connection.status !== 'connected') return;
+    commandPendingRef.current = true;
+    setCommandPending(true);
+    try { await action(); } finally {
+      commandPendingRef.current = false;
+      setCommandPending(false);
+    }
+  };
+
+  const finishWrite = useCallback((status: 'success' | 'error', message: string) => {
+    const attempt = pendingWriteRef.current;
+    if (attempt === null) return;
+    pendingWriteRef.current = null;
+    setWriteStatus(status);
+    setWriteMessage(message);
+    connection.addLog(message, status === 'success' ? 'info' : 'error', {
+      id: `write-${attempt}`,
+      title: status === 'success' ? 'Write confirmed' : 'Write needs attention',
+    });
+  }, [connection.addLog]);
+
+  useEffect(() => {
+    if (writeStatus !== 'pending') return;
+    const timer = window.setTimeout(() => {
+      finishWrite('error', 'No write response received. Scan the tag to verify its data before retrying.');
+    }, 10000);
+    return () => window.clearTimeout(timer);
+  }, [writeStatus, finishWrite]);
+
+  useEffect(() => {
+    if (connection.status !== 'connected' && connection.status !== 'connecting' && writeStatus === 'pending') {
+      finishWrite('error', 'Connection lost before write confirmation. Scan the tag to verify its data before retrying.');
+    }
+  }, [connection.status, writeStatus, finishWrite]);
 
   const clearBatchSavingTimer = useCallback(() => {
     if (batchSavingTimerRef.current !== null) {
@@ -71,6 +114,7 @@ const App: React.FC = () => {
 
   // --- Unified Data Handler ---
 const handleDataReceived = useCallback((data: any) => {
+    const handledSettingsReply = settingsActions.handleDataReceived(data);
     // 1. Dữ liệu hệ thống (Pin, Info, Settings) luôn được cho phép xử lý
     connection.handleDataReceived(data);
 
@@ -85,26 +129,16 @@ const handleDataReceived = useCallback((data: any) => {
       scan.handleDataReceived(data);
     }
 
-    // 3. GUARD BẢO VỆ FIND MODE:
-    // Chỉ truyền gói F (tín hiệu định vị) xuống khi isLocating đang là true
-    if (data.cmd === 'F') {
-      if (locate.isLocating) {
-        locate.handleDataReceived(data);
-      }
-    } else {
-      locate.handleDataReceived(data);
-    }
+    // The locate hook guards the active session and target synchronously,
+    // including a response arriving before React renders the new state.
+    locate.handleDataReceived(data);
 
     // 4. Write Responses
     if (data.cmd === 'WE' || data.cmd === 'WD') {
         if (data.status === 'ok') {
-            setWriteStatus('success');
-            setWriteMessage('Operation Successful');
-            connection.addLog('Write Success', 'info');
+            finishWrite('success', 'The reader confirmed the write. Scan the tag again to verify its data.');
         } else {
-            setWriteStatus('error');
-            setWriteMessage(`Failed: ${data.code || 'Unknown Error'}`);
-            connection.addLog(`Write Failed: ${data.code}`, 'error');
+            finishWrite('error', `Write failed (${data.code ?? data.msg ?? 'unknown error'}). Check the target tag and scan its data before retrying.`);
         }
     }
 
@@ -140,7 +174,7 @@ const handleDataReceived = useCallback((data: any) => {
       }
     }
 
-    if (data.cmd === 'SF') {
+    if (data.cmd === 'SF' && !handledSettingsReply) {
       if (data.status === 'ok') {
         connection.addLog(`Region Band set: ${data.val ?? data.mode ?? 'updated'}`, 'info');
         void bleService.getRegion().catch((error) => connection.addLog(`Region sync failed: ${error.message}`, 'error'));
@@ -149,10 +183,28 @@ const handleDataReceived = useCallback((data: any) => {
       }
     }
 
-    if (data.cmd === 'GF' && data.status === 'err') {
+    if (data.cmd === 'GF' && data.status === 'err' && !handledSettingsReply) {
       connection.addLog(`Region Band read failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
     }
-  }, [connection, scan, locate, markBatchSaving, clearBatchSaving]);
+
+    if (data.cmd === 'SDN' && !handledSettingsReply) {
+      const status = String(data.status ?? '').toLowerCase();
+      if (status === 'err' || status === 'error' || data.ok === false) {
+        connection.addLog(`Bluetooth name update failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
+      } else {
+        connection.addLog('Bluetooth name saved; disconnect to publish it in the next advertising cycle', 'info');
+        // Re-read the persisted value instead of trusting an optimistic UI update.
+        void bleService.getConfiguredDeviceName().catch((error) => connection.addLog(`Device name sync failed: ${error.message}`, 'error'));
+      }
+    }
+
+    if (data.cmd === 'GDN' && !handledSettingsReply) {
+      const status = String(data.status ?? '').toLowerCase();
+      if (status === 'err' || status === 'error' || data.ok === false) {
+        connection.addLog(`Bluetooth name read failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
+      }
+    }
+  }, [connection, scan, locate, markBatchSaving, clearBatchSaving, finishWrite, settingsActions.handleDataReceived]);
 
   useEffect(() => {
     if (fileTransfer.transferStatus === 'saving') {
@@ -169,9 +221,10 @@ const handleDataReceived = useCallback((data: any) => {
     bleService.setCallbacks(
       handleDataReceived, 
       (msg, type) => connection.addLog(msg, type), 
-      fileTransfer.handleFileCallback
+      fileTransfer.handleFileCallback,
+      connection.handleConnectionStatusChange,
     );
-  }, [handleDataReceived, connection.addLog, fileTransfer.handleFileCallback]);
+  }, [handleDataReceived, connection.addLog, connection.handleConnectionStatusChange, fileTransfer.handleFileCallback]);
 
   useEffect(() => {
     if (connection.status !== 'disconnected' && connection.status !== 'error') return;
@@ -248,14 +301,10 @@ const handleDataReceived = useCallback((data: any) => {
     }
   };
 
-  const handleSaveConfig = async () => {
-      try {
-          await bleService.saveConfig();
-          connection.addLog('Configuration Saved to Flash', 'info');
-      } catch (e: any) {
-          connection.addLog(`Save Config Failed: ${e.message}`, 'error');
-      }
-  };
+  const handleSettingsAction = useCallback((request: SettingsRequest) => {
+    if (commandPendingRef.current || pendingWriteRef.current !== null || scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
+    return settingsActions.run(request);
+  }, [scan.isScanning, locate.isLocating, isBatchSaving, fileTransfer.isFileTransferring, settingsActions.run]);
 
   const handleApplyPreset = async (mode: 'standard' | 'quick' | 'deep') => {
     try {
@@ -275,40 +324,51 @@ const handleDataReceived = useCallback((data: any) => {
         await bleService.setTagFocus(true);
         connection.addLog('Applied Deep Scan Mode', 'info');
       }
+      await bleService.getProfile();
+      await bleService.getQSession();
+      await bleService.getTagFocus();
     } catch (e: any) {
       connection.addLog(`Failed to apply preset: ${e.message}`, 'error');
+      throw e;
     }
   };
 
-  const handleWriteEpc = async (targetEpc: string, newEpc: string, password?: string) => {
+  const writeTag = async (action: () => Promise<void>) => {
+    if (pendingWriteRef.current !== null || commandPendingRef.current || settingsActions.isPending() || connection.status !== 'connected' || scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
+    const attempt = ++writeAttemptRef.current;
+    pendingWriteRef.current = attempt;
     setWriteStatus('pending');
     setWriteMessage('');
     try {
-      await bleService.writeEpc(targetEpc, newEpc, password);
+      await action();
     } catch (e: any) {
-      setWriteStatus('error');
-      setWriteMessage(e.message);
+      if (pendingWriteRef.current === attempt) finishWrite('error', `Write command failed: ${e.message}. Scan the tag to verify its data before retrying.`);
     }
   };
 
-  const handleWriteData = async (epc: string, mem: number, ptr: number, data: string, password?: string) => {
-    setWriteStatus('pending');
-    setWriteMessage('');
-    try {
-      await bleService.writeData(epc, mem, ptr, data, password);
-    } catch (e: any) {
-      setWriteStatus('error');
-      setWriteMessage(e.message);
-    }
-  };
+  const handleWriteEpc = (targetEpc: string, newEpc: string, password?: string) =>
+    writeTag(() => bleService.writeEpc(targetEpc, newEpc, password));
+
+  const handleWriteData = (epc: string, mem: number, ptr: number, data: string, password?: string) =>
+    writeTag(() => bleService.writeData(epc, mem, ptr, data, password));
 
   const handleDownloadLogs = () => {
     try {
-      const blob = new Blob([JSON.stringify(connection.logs, null, 2)], { type: 'application/json' });
+      const report = {
+        format: 'nhr10-service-report',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        connectionStatus: connection.status,
+        device: connection.settings,
+        operation: { scanType: scan.activeScanType, locating: locate.isLocating, batchSave: batchSaveInfo },
+        environment: { userAgent: navigator.userAgent, secureContext: window.isSecureContext, webBluetooth: 'bluetooth' in navigator },
+        logs: connection.logs,
+      };
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `system_logs_${Date.now()}.json`;
+      a.download = `nhr10_service_report_${Date.now()}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -334,12 +394,15 @@ const handleDataReceived = useCallback((data: any) => {
       tags={scan.tags}
       scanStats={scan.stats}
       logs={connection.logs}
+      commandPending={commandPending}
+      settingsActivity={settingsActions.activity}
+      onSettingsAction={handleSettingsAction}
       
       onConnect={connection.connect}
       onDisconnect={() => {
         connection.disconnect();
-        scan.stopScan(); // Ensure scan state is reset
-        locate.stopLocate();
+        scan.resetScanSession();
+        locate.resetLocateState();
       }}
       
       isScanning={scan.isScanning}
@@ -350,25 +413,23 @@ const handleDataReceived = useCallback((data: any) => {
       staleRemoveMs={scan.staleRemoveMs}
       onChangeRemoveStaleTags={scan.setRemoveStaleTags}
       onChangeStaleRemoveMs={scan.setStaleRemoveMs}
-      onStartScan={scan.startScan}
-      onStopScan={() => {
-        scan.stopScan();
-        locate.stopLocate(); // Dọn dẹp triệt để state để không bị auto-restart
-      }}
-      onStartBatch={scan.startBatch}
-      onStopBatch={() => {
+      onStartScan={() => runOperation(scan.startScan)}
+      onStopScan={() => runOperation(async () => {
+        await scan.stopScan();
+        locate.resetLocateState();
+      })}
+      onStartBatch={() => runOperation(scan.startBatch)}
+      onStopBatch={() => runOperation(async () => {
         markBatchSaving();
-        scan.stopScan();
-        locate.stopLocate(); // Unified stop
-      }}
+        await scan.stopScan();
+        locate.resetLocateState();
+      })}
       onClearTags={scan.clearTags}
       
-      onLocate={locate.startLocate}
-      onStopLocate={() => {
-        scan.stopScan();
-        locate.stopLocate();
-      }}
+      onLocate={(epc) => runOperation(() => locate.startLocate(epc))}
+      onStopLocate={() => runOperation(locate.stopLocate)}
       targetRssi={locate.targetRssi}
+      locateSignalState={locate.signalState}
       isLocating={locate.isLocating}
       
       onWriteEpc={handleWriteEpc}
@@ -378,7 +439,6 @@ const handleDataReceived = useCallback((data: any) => {
       
       onUpdateSettings={handleUpdateSettings}
       onSaveSetting={handleSaveSetting}
-      onSaveConfig={handleSaveConfig}
       onApplyPreset={handleApplyPreset}
       onShowPopup={handleShowPopup}
       

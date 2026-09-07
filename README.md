@@ -46,6 +46,31 @@ TypeScript check:
 npm run lint
 ```
 
+## Demo controller interface
+
+The controller opens on **Scan tags**, with a three-step connection and inventory guide. Main navigation contains **Scan tags**, **Find a tag**, **Write EPC**, and **Saved data**. **Advanced** contains **Device settings** and **Diagnostics**; the Develop/camera tab has been removed.
+
+- **Scan tags:** Start scan shows live EPCs. Scan to device records a batch on the reader. Scan options holds RF presets and the stale-tag timeout, entered directly in milliseconds. Find tag carries an EPC into the locating view. Excluded tags can be restored.
+- **Find a tag:** Select a scanned EPC or enter it manually. Positive firmware signal values are labelled reader units; negative RSSI values are labelled dBm. The signal bar is relative, not a distance estimate.
+- **Write EPC:** Validate hexadecimal words, review the selected data, and confirm before writing. Advanced memory writing stays collapsed until needed. A missing write acknowledgement times out after 10 seconds and asks the operator to verify the tag before retrying.
+- **Saved data:** Stop and save the batch, then retrieve its EPC list. CSV, TXT, JSON, and sharing are available after download. Clear preview only clears the browser data.
+- **Device settings:** Read retrieves the current device value; Apply sends an update. Save configuration persists applied settings. RF edits and conflicting operations are disabled while the device is busy.
+- **Diagnostics:** Inspect identity, firmware, voltage, charger and temperature; filter or search TX/RX/error events; test the reader display/buzzer. Export service report downloads device state, environment details, operation state, and up to 1,000 retained log entries as JSON.
+
+Browser notices expire after **4.2 seconds** (normal) or **6.5 seconds** (errors). Notification timers are independent of incoming BLE traffic. Identical repeated events are suppressed for 10 seconds, and notices can be dismissed manually. Full events remain in Diagnostics.
+
+Verification:
+
+```bash
+npm run lint
+npm test
+npm run build
+```
+
+Automated tests cover notification lifetime during streaming telemetry, navigation, busy-state guards, EPC confirmation, diagnostic filtering, and operation coordination. Actual RF performance, BLE reconnect, tag writes, and firmware batch save should also be checked with an NHR-10 reader.
+
+For browser UI checks, run the development server and open `/tests/ui.html`. This explicitly labelled fixture provides 240 simulated tags and continuous RX logs without connecting to hardware. It is not included in the production build.
+
 ## 3. Current App Operation Manual
 
 ### 3.1 Connecting The Reader
@@ -53,34 +78,34 @@ npm run lint
 1. Open the web app.
 2. Press `Connect`.
 3. The browser opens the Bluetooth device picker.
-4. Select a device whose advertised name starts with `NHR-10` or `Nextwaves`.
-5. The app connects to the GATT server, gets service `FF`, and discovers characteristics `FF01`, `FF02`, and `FF03`.
-6. The app starts notifications on `FF01`.
-7. The app reads the initial reader state: device info, firmware, battery, power, link profile, Q/session, query params, Tag Focus, and temperature.
+4. Select the device by its configured advertising name. A factory/default unit uses `NHR10-XXXXXX`; legacy `NHR-10` and `Nextwaves` names remain supported during migration.
+5. The app connects to GATT, gets service `FF`, discovers characteristics `FF01`, `FF02`, and `FF03`, and starts notifications on `FF01`.
+6. The web client issues `DI` over `FF01` and verifies its Canonical ID (`NHR10-` plus 12 hexadecimal MAC digits). For a default `NHR10-XXXXXX` name it also verifies the six-digit suffix; a configured free-form name remains separate from identity. It does not read Device Information Serial Number `0x2A25`, which Web Bluetooth blocklists for privacy.
+7. Only after identity verification succeeds does the app mark the transport ready and read the initial reader state: configured Bluetooth name, firmware, battery, power, link profile, Q/session, query params, Tag Focus, region, and temperature.
 
-After connection, the app starts a heartbeat loop to verify that the device is still online. If the app is idle and battery updates stop, or if scanning is active but `FF01` traffic stops, the app marks the device as disconnected so the UI does not show stale state.
+After connection, the app starts a heartbeat loop to verify that the device is still online. If the GATT link drops unexpectedly, the app invalidates the old GATT characteristics and makes five bounded reconnect attempts (0.5 s, 1 s, 2 s, 4 s, and 8 s delays) against the same browser-authorized device. Every successful reconnect rediscovers services/characteristics, re-enables notifications, revalidates identity through `DI`, and resynchronizes reader state. A user-requested disconnect never triggers automatic reconnect.
 
-### 3.2 Scanner Tab
+### 3.2 Scan Tags
 
 The Scanner tab is used for realtime inventory and batch mode.
 
 Interactive scan:
 
-1. Press `START SCAN`.
+1. Press `Start scan`.
 2. The app clears the previous tag list.
 3. The app sends `{ "cmd": "S" }` through `FF01`.
 4. The reader starts inventory.
 5. The reader sends `live_tags` notifications through `FF01`.
 6. The app merges tags by EPC and updates count, RSSI, first seen, and last seen.
 7. The UI renders the tag list with throttling to stay smooth at high tag rates.
-8. Press `STOP SCAN`; the app sends `{ "cmd": "X" }` in a short repeated burst to improve reliability in noisy BLE environments.
+8. Press `Stop scan`; the app sends `{ "cmd": "X" }` in a short repeated burst to improve reliability in noisy BLE environments.
 
 Batch mode:
 
-1. Press `BATCH MODE`.
+1. Press `Scan to device`.
 2. The app sends `{ "cmd": "SB" }`.
 3. The reader performs inventory and stores data internally.
-4. Press `STOP BATCH`; the app sends `{ "cmd": "XB" }`.
+4. Press `Stop & save batch`; the app sends `{ "cmd": "XB" }`.
 5. If the reader returns `saving` or `busy`, the app waits until device-side saving is complete.
 6. Batch data is downloaded from the Storage tab using the `FF02`/`FF03` file-transfer flow.
 
@@ -139,18 +164,19 @@ The Storage tab downloads batch data stored in the reader:
 
 If the reader is still saving batch data, the app receives a busy response and retries up to 8 times, with a 1200 ms delay between attempts.
 
-### 3.6 Settings Tab
+### 3.6 Advanced Device Settings
 
 The Settings tab reads and writes reader configuration:
 
 | Setting | Read command | Set command | Notes |
 |---|---|---|---|
+| Bluetooth device name | `GDN` | `SDN` | Persistent GAP/advertising name, 1–14 UTF-8 bytes |
 | RF output power | `GP` | `SP` | dBm value |
 | RF link profile | `GLP` | `SLP` | Example profiles: 11/13/53 |
 | Q/session | `GQS` | `SQS` | EPC Gen2 singulation parameters |
 | Query timing | `GQP` | `SQP` | interval, dwell, append |
 | Tag Focus | `GTF` | `TF`, `STF` | `TF` sets runtime value, `STF` saves it |
-| Device popup | - | `POPUP` | Tests display on the reader |
+| Device popup (Diagnostics) | - | `POPUP` | Tests display on the reader |
 | Save config | - | `SAVE` | Saves configuration to flash |
 
 ## 4. Code Architecture
@@ -166,6 +192,7 @@ The Settings tab reads and writes reader configuration:
 │   ├── useLocateLogic.ts
 │   └── useFileTransfer.ts
 ├── utils/
+│   ├── battery.ts
 │   └── nhrbParser.ts
 ├── components/
 │   └── dashboard/
@@ -175,10 +202,11 @@ The Settings tab reads and writes reader configuration:
 Module roles:
 
 - `services/bleService.ts`: BLE transport/protocol layer. It owns UUIDs, characteristics, connection flow, command sending, and notification parsing.
-- `hooks/useRFIDConnection.ts`: connected/disconnected state, settings, battery heartbeat, telemetry.
+- `hooks/useRFIDConnection.ts`: connected/disconnected state, settings, battery snapshots, telemetry.
 - `hooks/useScanLogic.ts`: interactive scan, batch scan, live tag map, statistics, stop burst.
 - `hooks/useLocateLogic.ts`: locate state and RSSI response handling.
 - `hooks/useFileTransfer.ts`: file request, transfer progress, busy retry, NHRB parsing.
+- `utils/battery.ts`: validates `GB` telemetry and derives the shared relative battery gauge.
 - `utils/nhrbParser.ts`: batch file parser, independent from React.
 - `App.tsx`: connects `bleService` callbacks to hooks and protects operation mode routing.
 - `components/`: current UI. This can be replaced completely in another app.
@@ -196,9 +224,16 @@ The device uses a custom BLE service:
 
 Device selector:
 
-- Prefer `namePrefix: "NHR-10"` or `namePrefix: "Nextwaves"`.
-- Always pass `optionalServices: [SERVICE_UUID]`.
+- Prefer the advertised custom service UUID and the new `namePrefix: "NHR10-"`; retain `NHR-10` and `Nextwaves` filters only for migration.
+- Always pass the custom service in `optionalServices` for the `acceptAllDevices` fallback. Do not request or read the blocklisted Device Information Serial Number `0x2A25` from a Web Bluetooth client.
 - If a runtime cannot parse the filters, fallback to `acceptAllDevices: true`, but still pass `optionalServices`.
+- Never use `BluetoothDevice.id`, an Android BLE address, or an iOS peripheral UUID as the business identity. Use the verified Canonical ID.
+
+### Device-initiated unpair
+
+When `FF01` sends `{"cmd":"UQ","v":1}`, the transport treats it as an intentional unpair rather than link loss. It synchronously disables reconnect, cancels the reconnect delay and queued commands, clears persisted device/auto-connect keys, and immediately writes `{"cmd":"UA","v":1}` to `FF01` with response. The app does not close GATT before this ACK and waits for the peripheral to disconnect.
+
+After that disconnect, the selected device reference is released and no reconnect is scheduled. A new connection is possible only through the user-initiated Bluetooth picker. Other JSON packets and binary `live_tags` packets on `FF01` keep their existing handling.
 
 ## 6. Operation State Machine
 
@@ -213,8 +248,8 @@ Meaning:
 | Mode | Reader activity | App accepts |
 |---|---|---|
 | `idle` | No inventory | Settings, battery, temperature |
-| `interactive` | Realtime scan | `live_tags`, battery heartbeat |
-| `batch` | Device-side batch inventory | Status, slower battery heartbeat |
+| `interactive` | Realtime scan | `live_tags`, battery snapshots |
+| `batch` | Device-side batch inventory | Status, slower battery polling |
 | `batchSaving` | Reader is saving batch data | Avoid dense polling, wait for save completion |
 | `locate` | Target EPC search | `F` response with RSSI |
 
@@ -297,7 +332,8 @@ Main commands:
 
 | Command | Purpose |
 |---|---|
-| `DI` | Read device info/name |
+| `DI` | Read immutable device identity and firmware info |
+| `GDN` / `SDN` | Get/set the persistent GAP and advertising device name |
 | `GRI` | Read firmware/info |
 | `GB` | Read battery |
 | `GT` | Read temperature |
@@ -314,6 +350,21 @@ Main commands:
 | `POPUP` | Show popup on reader |
 | `SAVE` | Save configuration |
 
+### 8.1 Bluetooth device name
+
+The Settings tab reads the configured name with `{"cmd":"GDN"}` and writes it
+with `{"cmd":"SDN","val":"HANDHELD KHO A"}`. The client accepts exactly
+1–14 UTF-8 bytes (excluding the firmware's trailing NUL), rejects malformed
+Unicode and C0/C1 control characters, and uses `JSON.stringify` so quotes and
+backslashes are escaped correctly.
+
+After an `SDN` acknowledgement, the client issues `GDN` again and treats that
+response as authoritative. Firmware is responsible for committing the value to
+NVS, applying it to both the GAP Device Name and advertising payload, and
+publishing it when advertising restarts after disconnect. `SDN` never changes
+the `DI` Canonical ID/MAC. Device discovery continues to work with arbitrary
+configured names because the primary picker filter uses the custom service UUID.
+
 ## 9. Notification Protocol
 
 ### 9.1 JSON Response
@@ -323,8 +374,33 @@ If an `FF01` notification starts with byte `{` (`0x7B`), the app decodes it as U
 Example:
 
 ```json
-{ "cmd": "GB", "voltage": 3.9, "state": "normal" }
+{"cmd":"GB","voltage":7920,"state":"NORMAL","load":"idle","chg":"fast CC","vbus":9008,"ibat":846,"pd_v":9000,"pd_i":2000,"fault":0}
 ```
+
+The app keeps `voltage` as integer pack millivolts and normalizes the protection
+state only for internal comparison. Charger fields are optional because the
+firmware can send either the extended response, the compact response, or
+`"chg":"unknown"` when fresh charger telemetry is unavailable.
+
+The displayed percentage is a relative five-zone gauge, not measured state of
+charge. `utils/battery.ts` interpolates 20% within each adjacent pair of bounds:
+
+```text
+6000, 7000, 7400, 7700, 8000, 8400 mV
+  0%,  20%,  40%,  60%,  80%, 100%
+```
+
+The client polls `GB` no faster than once every five seconds because firmware
+refreshes its slow UI/BLE battery value on that cadence. A mode transition uses
+the next eligible poll. Any unsolicited `GB`, including warning and shutdown
+notifications, replaces the current snapshot. On disconnect or battery timeout,
+the last snapshot is retained with `stale: true`; it is never replaced with 0 V
+or 0%.
+
+Web Bluetooth does not expose an API for explicitly requesting ATT MTU 185. The
+browser and operating system negotiate the MTU; deployments must verify that the
+resulting notification payload can carry at least the firmware's compact `GB`
+response.
 
 ### 9.2 Binary live_tags
 
@@ -454,7 +530,8 @@ The key point: the new app does not have to use Web Bluetooth. As long as it kee
 ## 13. Integration Checklist
 
 - If using Web Bluetooth, connect must be triggered by a user action.
-- Always include the custom service UUID in `optionalServices`.
+- Always include the custom service UUID in `optionalServices`; verify web identities through `DI` instead of the blocklisted `0x2A25` characteristic.
+- Validate the Canonical ID after connecting and after every automatic reconnect.
 - Do not send parallel commands on the same characteristic.
 - Keep a small delay between command writes.
 - Do not run `interactive`, `batch`, and `locate` at the same time.
@@ -479,3 +556,15 @@ The key point: the new app does not have to use Web Bluetooth. As long as it kee
 - [Chrome Developers: Communicating with Bluetooth devices over JavaScript](https://developer.chrome.com/docs/capabilities/bluetooth)
 - [Google Chrome Help: Connect a website to a Bluetooth device](https://support.google.com/chrome/answer/6362090)
 - [WebKit Bug 238049: Add Support for Web Bluetooth in iOS WebKit](https://bugs.webkit.org/show_bug.cgi?id=238049)
+
+## Controller feedback and targeted writes
+
+Device settings now wait for device replies and verify Apply by reading the value back. See [the inspected firmware contract and missing Region/Save handlers](docs/settings-firmware-contract.md) before relying on those features.
+
+- Device activity occupies a fixed-height row. Pending commands disable conflicting controls without inserting inline notices or moving the page contents.
+- Find mode treats `F` with `rssi: -100` as the NHR-10 lost-target sentinel, not a measured signal. The available NHR-10 REVC firmware sends this after 2 seconds without a target read. A 2.5-second browser watchdog also clears a stale reading if that notification is missed. Waiting, detected, lost and stopped states remain separate; late packets for another EPC or a stopped session are ignored.
+- Write results appear in the shared dismissible notification: 4.2 seconds for a confirmation, 6.5 seconds for an error. Each write attempt has its own notification identity. Transport errors, a disconnect and a 10-second response timeout also produce a notice. All results remain in Diagnostics / the exported service report after the toast disappears.
+- Advanced memory write uses a single Target EPC input. When Scan tags has results, its arrow opens those EPCs directly; typing filters the list, and selecting an EPC closes it. With no scan results, the input remains available for manual entry without a dropdown. Selection fills the actual `epc` field sent with `WE` or `WD`; it does not alter the stored scan results. Those results are previous observations and are not a fresh presence check. Scan again after writing to verify the new data.
+- Quick EPC write sends an empty target EPC. The available firmware forwards this to the RFID module with a zero-length EPC selector; there is no firmware-side count check proving that exactly one physical tag is present. Do not assume that multiple tags must yield a failure. Isolate one tag for quick write, or select its EPC in Advanced memory write. Tags sharing an EPC still cannot be distinguished by an EPC-only selector.
+
+Validation: `npm run lint`, `npm test`, and `npm run build`. The development-only `/tests/ui.html` fixture provides command-wait, tag-lost and write-failure controls with simulated tags and continuous RX logs. It never connects to a reader and is not a production build entry point. Hardware write outcomes still require validation on the device and its installed firmware.

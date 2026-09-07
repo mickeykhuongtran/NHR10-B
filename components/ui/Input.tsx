@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useId } from 'react';
 
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -6,14 +6,19 @@ interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
 }
 
 export const Input: React.FC<InputProps> = ({ label, error, className = '', ...props }) => {
+  const generatedId = useId();
+  const id = props.id ?? generatedId;
   return (
     <div className="w-full">
-      {label && <label className="block text-[10px] font-semibold text-[#6E6E73] mb-1">{label}</label>}
+      {label && <label htmlFor={id} className="mb-2 block text-sm font-medium text-slate-600">{label}</label>}
       <input
-        className={`w-full bg-white border ${error ? 'border-[#FF3B30] text-[#FF3B30]' : 'border-[#D2D2D7] focus:border-[#007AFF] text-[#1D1D1F]'} rounded-lg px-3 py-1.5 text-xs font-mono placeholder-[#A1A1A6] focus:outline-none focus:ring-2 focus:ring-[#007AFF]/10 transition-colors duration-200 ${className}`}
+        id={id}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${id}-error` : undefined}
+        className={`controller-input w-full bg-white border ${error ? 'border-red-500 text-red-700' : 'border-slate-200 focus:border-blue-500 text-slate-900'} rounded-lg px-3 py-2 text-sm placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/10 transition-colors ${className}`}
         {...props}
       />
-      {error && <p className="mt-1 text-[10px] text-[#FF3B30]">{error}</p>}
+      {error && <p id={`${id}-error`} className="mt-1 text-sm text-red-700">{error}</p>}
     </div>
   );
 };

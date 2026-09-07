@@ -1,10 +1,14 @@
-import React, { useState } from 'react';
-import { Download, FileText, Database, RefreshCw, Trash2, FileSpreadsheet, Share2, X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import AutoSizer from 'react-virtualized-auto-sizer';
+import { FixedSizeList as List } from 'react-window';
 import { Button } from '../ui/Button';
 import { BatchHistoryRecord, BatchSaveInfo, FileTransferStatus } from '../../types';
 import { PageHeader } from './PageHeader';
 
 interface HistoryTabProps {
+  isConnected: boolean;
+  isBusy: boolean;
+  onConnect: () => void;
   onFetchHistory: () => void;
   onDownloadJson: () => void;
   onDownloadCsv: () => void;
@@ -19,303 +23,39 @@ interface HistoryTabProps {
   historyData: BatchHistoryRecord[];
 }
 
-export const HistoryTab: React.FC<HistoryTabProps> = ({ 
-  onFetchHistory, 
-  onDownloadJson,
-  onDownloadCsv,
-  onDownloadTxt,
-  onShare,
-  onClearFileData,
-  isFileTransferring, 
-  transferProgress,
-  transferStatus,
-  isBatchSaving,
-  batchSaveInfo,
-  historyData
-}) => {
-  const [selectedEpcs, setSelectedEpcs] = useState<string[] | null>(null);
-  const [shareNotice, setShareNotice] = useState<string | null>(null);
-
-  const hasData = historyData && historyData.length > 0;
-  const isWaitingForDevice = isBatchSaving || transferStatus === 'saving';
-  const saveProgress = Math.max(0, Math.min(100, Math.round(batchSaveInfo.progress)));
-  const saveDetail = batchSaveInfo.total > 0
-    ? `${batchSaveInfo.written}/${batchSaveInfo.total} bytes`
-    : 'Waiting for SAVE progress from device';
-
-  const transferCopy = {
-    requesting: ['Requesting Data...', 'Sending send_file to FF02.'],
-    saving: ['Saving on Device...', 'Firmware is finalizing the NHRB batch file.'],
-    transferring: ['Transferring Data...', 'Receiving raw NHRB chunks from FF03.'],
-    parsing: ['Parsing NHRB...', 'Validating header, file size, and payload CRC32.'],
-    complete: ['Transfer Complete', 'Batch EPC list is ready.'],
-    error: ['Transfer Error', 'Check debug logs for details.'],
-    idle: ['Ready', 'Fetch batch EPC list from device memory.'],
-  }[transferStatus];
-
-  const handleShare = async () => {
-    if (!historyData || historyData.length === 0) return;
-
-    const formattedString = historyData
-      .map((record) => `${record.INDEX}. ${record.EPC}`)
-      .join('\n');
-
-    const shareData = {
-      title: 'RFID Batch History',
-      text: formattedString,
-    };
-
-    if (navigator.share) {
-      try {
-        await navigator.share(shareData);
-      } catch (err) {
-        // Ignore user cancellation
-        if ((err as Error).name !== 'AbortError') {
-          console.error('Error sharing:', err);
-        }
-      }
-    } else {
-      try {
-        await navigator.clipboard.writeText(formattedString);
-        setShareNotice('Sharing is not available in this browser. Data copied to clipboard.');
-      } catch (err) {
-        console.error('Failed to copy to clipboard:', err);
-        setShareNotice('Could not share or copy the data.');
-      }
+export const HistoryTab: React.FC<HistoryTabProps> = (props) => {
+  const [shareNotice, setShareNotice] = useState('');
+  const hasData = props.historyData.length > 0;
+  const saving = props.isBatchSaving || props.transferStatus === 'saving';
+  const progress = Math.max(0, Math.min(100, saving ? props.batchSaveInfo.progress : props.transferProgress));
+  const busy = saving || props.isBusy || props.isFileTransferring;
+  const supported = 'bluetooth' in navigator && window.isSecureContext;
+  const transferCopy: Record<FileTransferStatus, string> = {
+    idle: 'Ready to retrieve saved data', requesting: 'Requesting saved data…', saving: 'The reader is saving your batch…', transferring: 'Downloading from the reader…', parsing: 'Checking data integrity…', complete: 'Download complete', error: 'Download failed. Reconnect or check Diagnostics, then try again.',
+  };
+  useEffect(() => {
+    if (!shareNotice) return;
+    const timer = window.setTimeout(() => setShareNotice(''), 4200);
+    return () => window.clearTimeout(timer);
+  }, [shareNotice]);
+  const share = async () => {
+    const data = { title: 'NHR-10 batch inventory', text: props.historyData.map(row => `${row.INDEX}. ${row.EPC}`).join('\n') };
+    try {
+      if (navigator.share) await navigator.share(data);
+      else { await navigator.clipboard.writeText(data.text); setShareNotice('Batch data copied to clipboard.'); }
+    } catch (error) {
+      if (!(error instanceof Error && error.name === 'AbortError')) setShareNotice('Sharing is unavailable. Export the data as CSV, TXT, or JSON.');
     }
   };
-
-  const renderCellContent = (key: string, val: any) => {
-    // Check if it's the EPCS column or an array
-    if (key === 'EPCS' || Array.isArray(val)) {
-      const items = Array.isArray(val) ? val : [];
-      
-      if (items.length === 0) {
-        return <span className="text-slate-600 italic">Empty</span>;
-      }
-      
-      const displayItems = items.slice(0, 5);
-      const remaining = items.length - 5;
-
-      return (
-        <div className="flex flex-wrap gap-2">
-          {displayItems.map((item: any, idx: number) => (
-            <span 
-              key={idx} 
-              className="bg-slate-800 border border-slate-700 text-cyan-400 px-2 py-1 rounded-md text-[10px] font-mono break-all shadow-sm"
-            >
-              {String(item)}
-            </span>
-          ))}
-          {remaining > 0 && (
-            <button 
-              onClick={() => setSelectedEpcs(items)}
-              className="bg-slate-900 border border-slate-800 text-slate-500 px-2 py-1 rounded-md text-[10px] font-mono whitespace-nowrap shadow-sm hover:bg-slate-800 hover:text-cyan-300 transition-colors cursor-pointer"
-            >
-              +{remaining} more
-            </button>
-          )}
-        </div>
-      );
-    }
-
-    if (key === 'EPC') {
-      return <span className="text-[#0057D9] font-bold tracking-wide">{String(val)}</span>;
-    }
-    
-    // Default rendering for other types
-    return typeof val === 'object' ? JSON.stringify(val) : String(val);
-  };
-
-  return (
-    <div className="flex h-full flex-col gap-3 bg-transparent p-2 sm:p-3 md:p-5">
-      <PageHeader
-        icon={Database}
-        title="STORAGE"
-        subtitle={isWaitingForDevice ? `Saving on device ${saveProgress}%` : hasData ? `${historyData.length} unique EPCs loaded` : 'Fetch batch EPC list from device memory.'}
-        actions={
-          hasData && (
-            <>
-              <Button 
-                variant="outline" 
-                onClick={onClearFileData}
-                className="border-slate-800 text-slate-400 hover:text-red-400 hover:bg-red-900/10 h-9 px-3"
-                title="Clear Data"
-              >
-                <Trash2 size={16} />
-              </Button>
-              
-              <div className="h-6 w-px bg-slate-800 mx-1" />
-
-              <Button 
-                variant="outline" 
-                onClick={onDownloadTxt}
-                className="border-slate-800 text-slate-300 hover:text-blue-400 hover:bg-blue-900/10 h-9 px-3"
-                title="Download TXT"
-              >
-                <FileText size={16} className="mr-2" /> TXT
-              </Button>
-
-              <Button 
-                variant="outline" 
-                onClick={onDownloadCsv}
-                className="border-slate-800 text-slate-300 hover:text-emerald-400 hover:bg-emerald-900/10 h-9 px-3"
-                title="Download CSV"
-              >
-                <FileSpreadsheet size={16} className="mr-2" /> CSV
-              </Button>
-
-              <Button 
-                variant="outline" 
-                onClick={onDownloadJson}
-                className="border-slate-800 text-slate-300 hover:text-amber-400 hover:bg-amber-900/10 h-9 px-3"
-                title="Download JSON"
-              >
-                <Download size={16} className="mr-2" /> JSON
-              </Button>
-
-              <Button 
-                variant="outline" 
-                onClick={handleShare}
-                className="border-slate-800 text-slate-300 hover:text-purple-400 hover:bg-purple-900/10 h-9 px-3"
-                title="Share"
-              >
-                <Share2 size={16} className="mr-2" /> SHARE
-              </Button>
-            </>
-          )
-        }
-      />
-
-      {shareNotice && (
-        <div className="rounded-lg border border-[#D2D2D7] bg-white px-3 py-2 text-xs text-[#424245] shadow-sm">
-          <div className="flex items-center justify-between gap-3">
-            <span>{shareNotice}</span>
-            <button
-              onClick={() => setShareNotice(null)}
-              className="text-[#007AFF] font-medium"
-            >
-              OK
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Main Content */}
-      <div className="flex-1 overflow-hidden flex flex-col items-center justify-center">
-        
-        {!hasData && !isFileTransferring && (
-          <div className="text-center space-y-6 max-w-sm">
-            <div className="w-20 h-20 bg-slate-900 rounded-full flex items-center justify-center mx-auto border border-slate-800">
-              {isWaitingForDevice ? (
-                <RefreshCw className="w-10 h-10 text-cyan-500 animate-spin" />
-              ) : (
-                <FileText className="w-10 h-10 text-slate-700" />
-              )}
-            </div>
-            <div className="space-y-2">
-              <h3 className="text-slate-300 font-bold">{isWaitingForDevice ? 'Saving on Device' : 'No Data Loaded'}</h3>
-              <p className="text-slate-500 text-xs">
-                {isWaitingForDevice
-                  ? `${saveDetail}. Fetch will be enabled after saved.`
-                  : 'Fetch data from the device internal memory to preview and download unique EPC results.'}
-              </p>
-            </div>
-            <Button 
-              fullWidth 
-              size="lg" 
-              onClick={onFetchHistory}
-              disabled={isWaitingForDevice}
-              className="h-12 text-sm font-bold tracking-wider"
-            >
-              <RefreshCw size={18} className={`mr-2 ${isWaitingForDevice ? 'animate-spin' : ''}`} />
-              {isWaitingForDevice ? `SAVING... ${saveProgress}%` : 'FETCH DATA FROM DEVICE'}
-            </Button>
-          </div>
-        )}
-
-        {isFileTransferring && (
-          <div className="w-full max-w-sm bg-slate-900 p-6 rounded-lg border border-slate-800 shadow-xl space-y-4 text-center">
-            <RefreshCw className="w-8 h-8 text-cyan-500 animate-spin mx-auto" />
-            <div className="space-y-1">
-              <h3 className="text-slate-200 font-bold">{transferCopy[0]}</h3>
-              <p className="text-slate-500 text-xs font-mono">{transferCopy[1]}</p>
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between text-xs font-bold text-slate-400 uppercase tracking-wider">
-                <span>Progress</span>
-                <span>{transferProgress}%</span>
-              </div>
-              <div className="h-2 bg-slate-950 rounded-full overflow-hidden border border-slate-800">
-                <div 
-                  className="h-full bg-cyan-600 transition-all duration-300 ease-out"
-                  style={{ width: `${transferProgress}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {hasData && !isFileTransferring && (
-          <div className="w-full h-full flex flex-col bg-slate-900 rounded-lg border border-slate-800 overflow-hidden shadow-inner">
-            <div className="flex-1 overflow-auto custom-scrollbar">
-              <table className="w-full text-left border-collapse">
-                <thead className="bg-slate-950 sticky top-0 z-10 shadow-sm">
-                  <tr>
-                    {Object.keys(historyData[0] || {}).map((key) => (
-                      <th key={key} className={`p-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider border-b border-slate-800 bg-slate-950 ${key === 'EPCS' ? 'w-full min-w-[200px]' : 'whitespace-nowrap'}`}>
-                        {key}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {historyData.map((row: any, i: number) => (
-                    <tr key={i} className="hover:bg-slate-800/30 transition-colors">
-                      {Object.entries(row).map(([key, val]: [string, any], j: number) => (
-                        <td key={j} className={`p-3 text-xs text-slate-300 font-mono border-r border-slate-800/30 last:border-r-0 align-top ${key !== 'EPCS' ? 'whitespace-nowrap' : ''}`}>
-                          {renderCellContent(key, val)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="p-2 bg-slate-950 border-t border-slate-800 text-[10px] text-slate-600 font-mono text-center">
-              Previewing {historyData.length} unique EPCs
-            </div>
-          </div>
-        )}
-
-      </div>
-
-      {/* Modal */}
-      {selectedEpcs && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-950 border border-slate-800 rounded-lg w-full max-w-2xl shadow-2xl flex flex-col overflow-hidden">
-            <div className="bg-slate-900 border-b border-slate-800 p-4 flex justify-between items-center">
-              <h3 className="text-lg font-bold text-slate-200">EPC Details</h3>
-              <button 
-                onClick={() => setSelectedEpcs(null)}
-                className="text-slate-400 hover:text-white transition-colors"
-              >
-                <X size={20} />
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2 p-4 max-h-[60vh] overflow-y-auto custom-scrollbar">
-              {selectedEpcs.map((item, idx) => (
-                <span 
-                  key={idx} 
-                  className="bg-slate-800 border border-slate-700 text-cyan-400 px-2 py-1 rounded-md text-[10px] font-mono whitespace-nowrap shadow-sm"
-                >
-                  {String(item)}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  const Row = ({ index, style }: { index: number; style: React.CSSProperties }) => <div style={style} role="row" className="grid grid-cols-[70px_minmax(240px,1fr)] items-center border-b border-slate-100 px-5 text-sm hover:bg-slate-50"><span role="cell" className="text-slate-400">{props.historyData[index].INDEX}</span><span role="cell" className="select-text font-mono text-slate-700">{props.historyData[index].EPC}</span></div>;
+  return <div className="page-content">
+    <PageHeader title="Saved data" subtitle="Retrieve a batch from your reader and export the tag list." actions={<Button onClick={props.isConnected ? props.onFetchHistory : props.onConnect} disabled={busy || (!props.isConnected && !supported)}>{props.isFileTransferring ? 'Downloading…' : props.isConnected ? hasData ? 'Refresh from device' : 'Get saved data' : 'Connect device'}</Button>} />
+    <div className="rounded-xl border border-slate-200 bg-white px-5 py-4 text-sm leading-6 text-slate-500"><span className="mr-2 font-medium text-slate-700">Batch workflow</span>Scan tags → Scan to device → Stop & save batch → Get saved data.</div>
+    {shareNotice && <p role="status" className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm">{shareNotice}</p>}
+    {(saving || props.isFileTransferring || props.transferStatus === 'error') && <section role="status" className="rounded-xl border border-slate-200 bg-white p-5"><p className={`text-sm font-medium ${props.transferStatus === 'error' ? 'text-red-700' : 'text-slate-700'}`}>{saving ? transferCopy.saving : transferCopy[props.transferStatus]}</p>{props.transferStatus !== 'error' && <><div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-label={saving ? 'Saving batch' : 'File download'} aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${progress}%` }} /></div><p className="mt-2 text-right text-xs text-slate-400">{Math.round(progress)}%</p></>}</section>}
+    <section className="flex min-h-[360px] flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-5 py-4"><div><h2 className="text-sm font-semibold">Batch inventory</h2><p className="mt-1 text-xs text-slate-500">{hasData ? `${props.historyData.length.toLocaleString()} unique EPCs` : 'No saved tags loaded'}</p></div>{hasData && <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={props.onDownloadCsv}>Export CSV</Button><Button variant="outline" size="sm" onClick={props.onDownloadTxt}>TXT</Button><Button variant="outline" size="sm" onClick={props.onDownloadJson}>JSON</Button><button className="text-action" onClick={() => void share()}>Share</button><button className="text-action !text-slate-500" onClick={props.onClearFileData}>Clear preview</button></div>}</div>
+      {hasData ? <div role="table" aria-label="Saved RFID tags" aria-rowcount={props.historyData.length + 1} className="flex min-h-[280px] flex-1 flex-col overflow-x-auto"><div role="row" className="grid h-11 min-w-[400px] shrink-0 grid-cols-[70px_minmax(240px,1fr)] items-center border-b border-slate-200 bg-slate-50 px-5 text-xs text-slate-500"><span role="columnheader">#</span><span role="columnheader">EPC</span></div><div className="min-h-[240px] flex-1"><AutoSizer>{({ height, width }) => <List height={height} width={Math.max(400, width)} itemCount={props.historyData.length} itemSize={48}>{Row}</List>}</AutoSizer></div></div> : <div className="flex min-h-[280px] flex-1 flex-col items-center justify-center p-8 text-center"><p className="text-base font-semibold text-slate-800">{saving ? 'Your batch is being saved' : props.transferStatus === 'complete' ? 'The saved batch is empty' : 'Bring your batch into view'}</p><p className="mt-2 max-w-md text-sm leading-6 text-slate-500">{saving ? 'Wait for the reader to finish, then retrieve the file.' : props.transferStatus === 'complete' ? 'No EPC records were present in the downloaded file. Run another batch scan to collect tags.' : 'Use Scan to device to collect tags on the NHR-10. Stop and save the batch, then select Get saved data above.'}</p></div>}
+    </section>
+  </div>;
 };
