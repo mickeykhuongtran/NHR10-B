@@ -1,17 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { bleService } from '../services/bleService';
 import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision } from '../types';
-import { parseBatterySnapshot } from '../utils/battery';
+import { BATTERY_POLL_INTERVAL_MS, isBatteryShutdown, isBatterySnapshotStale, parseBatterySnapshot } from '../utils/battery';
 import { formatDeviceDisplayName } from '../utils/deviceIdentity';
 import { validateBleDeviceName } from '../utils/deviceName';
 import { isSettingsError, parseSettingReading } from '../utils/settingsProtocol';
 
-const IDLE_BATTERY_POLL_INTERVAL_MS = 5000;
-const IDLE_BATTERY_TIMEOUT_MS = 15000;
-const SCAN_NO_TAGS_BATTERY_POLL_INTERVAL_MS = 5000;
-const SCAN_LIVE_TAGS_BATTERY_POLL_INTERVAL_MS = 5000;
-const BATCH_BATTERY_POLL_INTERVAL_MS = 10000;
-const BATCH_BATTERY_TIMEOUT_MS = 30000;
+const BATCH_ACTIVITY_TIMEOUT_MS = 30000;
 const SCAN_ACTIVITY_TIMEOUT_MS = 15000;
 const HEARTBEAT_CHECK_INTERVAL_MS = 500;
 const TEMPERATURE_POLL_INTERVAL_MS = 5000;
@@ -86,9 +81,7 @@ export const useRFIDConnection = () => {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [inventoryActive, setInventoryActiveState] = useState(false);
   const [inventoryMode, setInventoryModeState] = useState<InventoryMode>('idle');
-  const lastBatteryHeartbeatRef = useRef<number | null>(null);
   const lastDeviceActivityRef = useRef<number | null>(null);
-  const lastLiveTagsAtRef = useRef<number | null>(null);
   const lastBatteryPollAtRef = useRef(0);
   const inventoryActiveRef = useRef(false);
   const inventoryModeRef = useRef<InventoryMode>('idle');
@@ -123,9 +116,7 @@ export const useRFIDConnection = () => {
   const clearDeviceTelemetry = useCallback(() => {
     setSettings(s => ({
       ...s,
-      batterySnapshot: s.batterySnapshot
-        ? { ...s.batterySnapshot, stale: true }
-        : null,
+      batterySnapshot: null,
       temperature: 0,
       deviceInfo: '',
       deviceName: '',
@@ -134,9 +125,7 @@ export const useRFIDConnection = () => {
   }, []);
 
   const resetConnectionTracking = useCallback(() => {
-    lastBatteryHeartbeatRef.current = null;
     lastDeviceActivityRef.current = null;
-    lastLiveTagsAtRef.current = null;
     lastBatteryPollAtRef.current = 0;
     inventoryActiveRef.current = false;
     inventoryModeRef.current = 'idle';
@@ -144,22 +133,17 @@ export const useRFIDConnection = () => {
     setInventoryModeState('idle');
   }, []);
 
-  const markDeviceActivity = useCallback((cmd?: string) => {
+  const markDeviceActivity = useCallback(() => {
     const now = Date.now();
     lastDeviceActivityRef.current = now;
-    if (cmd === 'live_tags') {
-      lastLiveTagsAtRef.current = now;
-    }
     heartbeatTimeoutReportedRef.current = false;
   }, []);
 
   const markBatteryHeartbeat = useCallback(() => {
-    const now = Date.now();
-    lastBatteryHeartbeatRef.current = now;
-    // Anchor the next poll to the received snapshot as well as to the write.
-    // This keeps every GB exchange at least one firmware refresh period apart.
+    const now = performance.now();
+    // Unsolicited warnings also count as a fresh battery exchange.
     lastBatteryPollAtRef.current = now;
-    markDeviceActivity('GB');
+    markDeviceActivity();
   }, [markDeviceActivity]);
 
   const setInventoryActive = useCallback((active: boolean, mode: InventoryMode = active ? 'interactive' : 'idle') => {
@@ -169,9 +153,7 @@ export const useRFIDConnection = () => {
     setInventoryActiveState(active);
     setInventoryModeState(nextMode);
     if (active && nextMode !== 'batch' && nextMode !== 'batchSaving') {
-      markDeviceActivity(nextMode);
-    } else {
-      lastLiveTagsAtRef.current = null;
+      markDeviceActivity();
     }
   }, [markDeviceActivity]);
 
@@ -190,7 +172,7 @@ export const useRFIDConnection = () => {
   }, [addLog, clearDeviceTelemetry, resetConnectionTracking]);
 
   const handleDataReceived = useCallback((data: any) => {
-    markDeviceActivity(data.cmd);
+    markDeviceActivity();
 
     // 3. Settings Responses
     if (data.cmd === 'DI') {
@@ -245,11 +227,11 @@ export const useRFIDConnection = () => {
     }
     if (data.cmd === 'GT') setSettings(s => ({ ...s, temperature: data.val }));
     if (data.cmd === 'GB') {
-        setStatus(current => current === 'connecting' ? 'connected' : current);
         const batterySnapshot = parseBatterySnapshot(data);
         if (batterySnapshot) {
             markBatteryHeartbeat();
-            setSettings(s => ({ ...s, batterySnapshot }));
+            setSettings(s => ({ ...s, batterySnapshot: s.batterySnapshot && isBatteryShutdown(s.batterySnapshot)
+              ? s.batterySnapshot : batterySnapshot }));
         } else {
             addLog('Ignored malformed GB battery response', 'error');
         }
@@ -333,11 +315,9 @@ export const useRFIDConnection = () => {
 
     if (nextStatus === 'connected') {
       const connectedAt = Date.now();
-      lastBatteryHeartbeatRef.current = connectedAt;
       lastDeviceActivityRef.current = connectedAt;
-      lastLiveTagsAtRef.current = null;
       // getSettings() below already queues one GB request for the reconnect.
-      lastBatteryPollAtRef.current = connectedAt;
+      lastBatteryPollAtRef.current = performance.now();
       heartbeatTimeoutReportedRef.current = false;
       setStatus('connected');
       void bleService.getSettings().catch((error: any) => {
@@ -359,9 +339,7 @@ export const useRFIDConnection = () => {
     setStatus('connecting');
     heartbeatTimeoutReportedRef.current = false;
     const now = Date.now();
-    lastBatteryHeartbeatRef.current = now;
     lastDeviceActivityRef.current = now;
-    lastLiveTagsAtRef.current = null;
     lastBatteryPollAtRef.current = 0;
     inventoryActiveRef.current = false;
     inventoryModeRef.current = 'idle';
@@ -371,10 +349,9 @@ export const useRFIDConnection = () => {
     try {
       await bleService.connect();
       const connectedAt = Date.now();
-      lastBatteryHeartbeatRef.current = connectedAt;
       lastDeviceActivityRef.current = connectedAt;
       // The initialization sequence below explicitly requests one GB snapshot.
-      lastBatteryPollAtRef.current = connectedAt;
+      lastBatteryPollAtRef.current = performance.now();
       const identity = bleService.getDeviceIdentity();
       const deviceLabel = formatDeviceDisplayName(
         bleService.getDeviceName(),
@@ -396,7 +373,7 @@ export const useRFIDConnection = () => {
       await bleService.getDeviceInfo();
       await bleService.getConfiguredDeviceName();
       await bleService.getInfo();
-      lastBatteryPollAtRef.current = Date.now();
+      lastBatteryPollAtRef.current = performance.now();
       await bleService.getBattery();
       await bleService.getPower();
       await bleService.getProfile();
@@ -411,9 +388,7 @@ export const useRFIDConnection = () => {
         addLog('Device unpair is in progress; waiting for peripheral disconnect.', 'info');
         return;
       }
-      lastBatteryHeartbeatRef.current = null;
       lastDeviceActivityRef.current = null;
-      lastLiveTagsAtRef.current = null;
       lastBatteryPollAtRef.current = 0;
       inventoryActiveRef.current = false;
       inventoryModeRef.current = 'idle';
@@ -434,37 +409,41 @@ export const useRFIDConnection = () => {
     clearDeviceTelemetry();
   };
 
-  const getBatteryPollInterval = useCallback((): number | null => {
-    const mode = inventoryModeRef.current;
-    if (mode === 'batch') return BATCH_BATTERY_POLL_INTERVAL_MS;
-    if (mode === 'batchSaving') return null;
-    if (!inventoryActiveRef.current) return IDLE_BATTERY_POLL_INTERVAL_MS;
-
-    const lastLiveTagsAt = lastLiveTagsAtRef.current;
-    const hasRecentLiveTags = lastLiveTagsAt !== null && Date.now() - lastLiveTagsAt <= SCAN_ACTIVITY_TIMEOUT_MS;
-    return hasRecentLiveTags ? SCAN_LIVE_TAGS_BATTERY_POLL_INTERVAL_MS : SCAN_NO_TAGS_BATTERY_POLL_INTERVAL_MS;
-  }, []);
-
-  // GB follows the firmware's five-second slow-filter cadence. Batch mode polls
-  // less often, and batch saving suspends polling to protect the transfer path.
+  // GB is independent of the RFID UART and can be polled in every operation mode.
   useEffect(() => {
     let heartbeatPollId: number | null = null;
-    let temperaturePollId: number | null = null;
 
     if (status === 'connected') {
+      let pending = false;
       const pollBattery = () => {
-        if (inventoryModeRef.current === 'batchSaving') return;
-        lastBatteryPollAtRef.current = Date.now();
-        void bleService.getBattery().catch(e => console.error("Battery poll failed", e));
+        if (pending) return;
+        pending = true;
+        lastBatteryPollAtRef.current = performance.now();
+        void bleService.getBattery()
+          .catch(e => console.error('Battery poll failed', e))
+          .finally(() => { pending = false; });
       };
 
       heartbeatPollId = window.setInterval(() => {
-        const batteryPollInterval = getBatteryPollInterval();
-        if (batteryPollInterval !== null && Date.now() - lastBatteryPollAtRef.current >= batteryPollInterval) {
+        if (performance.now() - lastBatteryPollAtRef.current >= BATTERY_POLL_INTERVAL_MS) {
           pollBattery();
         }
       }, HEARTBEAT_CHECK_INTERVAL_MS);
 
+      const onVisibilityChange = () => {
+        if (document.visibilityState === 'visible') pollBattery();
+      };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+      return () => {
+        if (heartbeatPollId !== null) window.clearInterval(heartbeatPollId);
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      };
+    }
+  }, [status]);
+
+  useEffect(() => {
+    let temperaturePollId: number | null = null;
+    if (status === 'connected') {
       if (inventoryMode === 'idle') {
         temperaturePollId = window.setInterval(() => {
           void bleService.getTemperature().catch(e => console.error("Temp poll failed", e));
@@ -473,10 +452,9 @@ export const useRFIDConnection = () => {
     }
 
     return () => {
-      if (heartbeatPollId !== null) window.clearInterval(heartbeatPollId);
       if (temperaturePollId !== null) window.clearInterval(temperaturePollId);
     };
-  }, [getBatteryPollInterval, inventoryMode, status]);
+  }, [inventoryMode, status]);
 
   useEffect(() => {
     if (status !== 'connected') return;
@@ -484,21 +462,17 @@ export const useRFIDConnection = () => {
     const heartbeatCheckId = window.setInterval(() => {
       const now = Date.now();
       const mode = inventoryModeRef.current;
+      // Expire the gauge even during batch saving or continuous RFID traffic.
+      setSettings(current => {
+        const snapshot = current.batterySnapshot;
+        if (!snapshot || snapshot.stale || !isBatterySnapshotStale(snapshot)) return current;
+        return { ...current, batterySnapshot: { ...snapshot, stale: true } };
+      });
       if (mode === 'batchSaving') {
         return;
       }
 
-      const lastHeartbeat = lastBatteryHeartbeatRef.current;
-      const batteryTimeoutMs = mode === 'batch' ? BATCH_BATTERY_TIMEOUT_MS : IDLE_BATTERY_TIMEOUT_MS;
-      if (!lastHeartbeat || now - lastHeartbeat > batteryTimeoutMs) {
-        setSettings(current => {
-          const snapshot = current.batterySnapshot;
-          if (!snapshot || snapshot.stale) return current;
-          return { ...current, batterySnapshot: { ...snapshot, stale: true } };
-        });
-      }
-
-      const activityTimeoutMs = mode === 'batch' ? BATCH_BATTERY_TIMEOUT_MS : SCAN_ACTIVITY_TIMEOUT_MS;
+      const activityTimeoutMs = mode === 'batch' ? BATCH_ACTIVITY_TIMEOUT_MS : SCAN_ACTIVITY_TIMEOUT_MS;
       const lastActivity = lastDeviceActivityRef.current;
       if (!lastActivity || now - lastActivity > activityTimeoutMs) {
         const context = mode === 'batch' ? 'batch' : inventoryActiveRef.current ? 'scan' : 'idle';

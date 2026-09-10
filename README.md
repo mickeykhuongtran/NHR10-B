@@ -206,7 +206,7 @@ Module roles:
 - `hooks/useScanLogic.ts`: interactive scan, batch scan, live tag map, statistics, stop burst.
 - `hooks/useLocateLogic.ts`: locate state and RSSI response handling.
 - `hooks/useFileTransfer.ts`: file request, transfer progress, busy retry, NHRB parsing.
-- `utils/battery.ts`: validates `GB` telemetry and derives the shared relative battery gauge.
+- `utils/battery.ts`: validates `GB` v2 telemetry and uses the firmware percentage for the shared battery gauge.
 - `utils/nhrbParser.ts`: batch file parser, independent from React.
 - `App.tsx`: connects `bleService` callbacks to hooks and protects operation mode routing.
 - `components/`: current UI. This can be replaced completely in another app.
@@ -249,8 +249,8 @@ Meaning:
 |---|---|---|
 | `idle` | No inventory | Settings, battery, temperature |
 | `interactive` | Realtime scan | `live_tags`, battery snapshots |
-| `batch` | Device-side batch inventory | Status, slower battery polling |
-| `batchSaving` | Reader is saving batch data | Avoid dense polling, wait for save completion |
+| `batch` | Device-side batch inventory | Status, battery polling every ~5 s |
+| `batchSaving` | Reader is saving batch data | Save progress, battery polling every ~5 s |
 | `locate` | Target EPC search | `F` response with RSSI |
 
 Important rules:
@@ -374,33 +374,34 @@ If an `FF01` notification starts with byte `{` (`0x7B`), the app decodes it as U
 Example:
 
 ```json
-{"cmd":"GB","voltage":7920,"state":"NORMAL","load":"idle","chg":"fast CC","vbus":9008,"ibat":846,"pd_v":9000,"pd_i":2000,"fault":0}
+{"cmd":"GB","voltage":7500,"state":"NORMAL","load":"load","ver":2,"percent":61.3,"valid":true,"charging":false,"full":false,"health":0,"age_ms":200}
 ```
 
-The app keeps `voltage` as integer pack millivolts and normalizes the protection
-state only for internal comparison. Charger fields are optional because the
-firmware can send either the extended response, the compact response, or
-`"chg":"unknown"` when fresh charger telemetry is unavailable.
+`ver: 2` identifies the battery payload contract, independently of firmware version.
+The gauge and percentage use `percent` directly with one decimal place. Voltage
+is retained in mV for diagnostics; the web performs no voltage-to-SOC conversion,
+RF compensation or extra SOC filtering. Invalid/missing percentages show `—`
+with an unknown gray gauge. Legacy firmware needs an update to report percentage;
+other payload versions are explicitly marked unsupported.
 
-The displayed percentage is a relative five-zone gauge, not measured state of
-charge. `utils/battery.ts` interpolates 20% within each adjacent pair of bounds:
+The client requests `GB` after notification subscription/connection, every ~5 s
+in all operation modes, and when the page returns to the foreground. Battery
+writes are coalesced and share the GATT queue with command and file-control writes.
+Unsolicited warning/shutdown GB packets use the same handler. A monotonic timer
+expires the gauge after ~15 s without fresh battery data, including during scan
+and batch saving. Charging/full are cleared from the display when stale. Shutdown
+is latched until disconnect; disconnect or device selection clears the snapshot.
 
-```text
-6000, 7000, 7400, 7700, 8000, 8400 mV
-  0%,  20%,  40%,  60%,  80%, 100%
-```
+`state`, `health`, `charging` and `full` determine status independently of the
+percentage. STAT false does not mean full, and 100% alone does not confirm full.
+See [battery firmware contract](docs/battery-firmware-contract.md) for validation,
+status priority, test commands and the real-device acceptance checklist.
 
-The client polls `GB` no faster than once every five seconds because firmware
-refreshes its slow UI/BLE battery value on that cadence. A mode transition uses
-the next eligible poll. Any unsolicited `GB`, including warning and shutdown
-notifications, replaces the current snapshot. On disconnect or battery timeout,
-the last snapshot is retained with `stale: true`; it is never replaced with 0 V
-or 0%.
-
-Web Bluetooth does not expose an API for explicitly requesting ATT MTU 185. The
-browser and operating system negotiate the MTU; deployments must verify that the
-resulting notification payload can carry at least the firmware's compact `GB`
-response.
+GB uses one complete UTF-8 JSON notification on FF01, without application
+fragmentation or a terminator. Reading FF01 does not retrieve battery data.
+The supplied firmware contract bounds GB at 176 bytes and prefers ATT MTU 185;
+MTU >=179 can carry the full current payload range. Verify MTU/notification
+delivery on the target browser, OS and adapter, including during dense RFID traffic.
 
 ### 9.2 Binary live_tags
 

@@ -133,7 +133,7 @@ it('shows lost state without a dBm reading or a nonzero meter, then recovers', (
   act(() => buttons().find(b => b.textContent?.includes('Find a tag'))!.click());
   expect(container.querySelector('main')?.textContent).toContain('Tag lost');
   expect(container.querySelector('main')?.textContent).not.toContain('dBm');
-  expect(container.querySelector('[role="meter"]')?.getAttribute('aria-valuenow')).toBe('0');
+  expect(container.querySelector('main [role="meter"]')?.getAttribute('aria-valuenow')).toBe('0');
   render(<DashboardLayout {...props} locateSignalState="detected" targetRssi={-63} />);
   expect(container.querySelector('main')?.textContent).toContain('Tag detected');
   expect(container.querySelector('main')?.textContent).toContain('-63dBm');

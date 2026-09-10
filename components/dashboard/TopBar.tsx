@@ -1,8 +1,7 @@
 import React from 'react';
-import { BatteryCharging, BatteryMedium } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { ConnectionStatus, Settings } from '../../types';
-import { isBatteryCharging } from '../../utils/battery';
+import { BatteryIndicator } from '../ui/BatteryIndicator';
 import { formatDeviceDisplayName } from '../../utils/deviceIdentity';
 import logoUrl from '../../logo/nws_logo.png';
 
@@ -15,10 +14,6 @@ interface TopBarProps {
 
 export const TopBar: React.FC<TopBarProps> = ({ status, settings, onConnect, onDisconnect }) => {
   const connected = status === 'connected';
-  const battery = settings.batterySnapshot;
-  const fresh = battery && !battery.stale;
-  const charging = fresh && isBatteryCharging(battery.chargePhase);
-  const BatteryIcon = charging ? BatteryCharging : BatteryMedium;
   const name = settings.deviceName || formatDeviceDisplayName('', undefined, settings.deviceInfo) || 'NHR-10';
   const statusLabel = connected ? 'Connected' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Connection failed' : 'Not connected';
   const supported = typeof navigator !== 'undefined' && 'bluetooth' in navigator && window.isSecureContext;
@@ -36,9 +31,7 @@ export const TopBar: React.FC<TopBarProps> = ({ status, settings, onConnect, onD
         {connected && <span className="hidden max-w-[180px] truncate text-sm text-slate-600 md:block" title={settings.deviceCanonicalId}>{name}</span>}
         <span className={`status-pill ${connected ? 'online' : ''}`}><span className="status-dot" />{statusLabel}</span>
         {connected && (
-          <span className={`inline-flex items-center gap-1.5 text-sm ${fresh && battery.protectionState !== 'normal' ? 'text-red-600' : 'text-slate-500'}`} title={battery ? `Relative voltage gauge · ${battery.voltageMv} mV · ${battery.chargePhase ?? 'Charge unknown'}${battery.stale ? ' · Stale reading' : ''}` : 'Battery reading unavailable'}>
-            <BatteryIcon size={17} />{fresh ? `${battery.visualPercent}%` : '—'}
-          </span>
+          <BatteryIndicator snapshot={settings.batterySnapshot} connected={connected} />
         )}
         <Button variant={connected ? 'outline' : 'primary'} size="sm" onClick={connected ? onDisconnect : onConnect} disabled={status === 'connecting' || (!connected && !supported)} title={!supported ? 'Use a browser with Web Bluetooth over HTTPS or localhost.' : undefined}>
           {connected ? 'Disconnect' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Try again' : 'Connect device'}

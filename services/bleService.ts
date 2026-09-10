@@ -135,6 +135,7 @@ class BLEService {
 
   // Command Queue to prevent GATT collisions
   private commandQueue: Promise<void> = Promise.resolve();
+  private pendingBatteryRequest: Promise<void> | null = null;
   private commandQueueGeneration = 0;
   private lastCommandWriteAt = 0;
   private acceptLiveTags = false;
@@ -512,6 +513,7 @@ class BLEService {
     this.resetFileState();
     this.commandQueueGeneration += 1;
     this.commandQueue = Promise.resolve();
+    this.pendingBatteryRequest = null;
     this.lastCommandWriteAt = 0;
     this.acceptLiveTags = false;
     this.clearPendingLiveTags();
@@ -1088,7 +1090,15 @@ class BLEService {
   async getPower() { return this.sendCommand({ cmd: 'GP' }); }
   async getProfile() { return this.sendCommand({ cmd: 'GLP' }); }
   async getQSession() { return this.sendCommand({ cmd: 'GQS' }); }
-  async getBattery() { return this.sendCommand({ cmd: 'GB' }); }
+  getBattery(): Promise<void> {
+    // A busy queue can retain at most one GB write, including manual refreshes.
+    if (this.pendingBatteryRequest) return this.pendingBatteryRequest;
+    const request = this.sendCommand({ cmd: 'GB' }).finally(() => {
+      if (this.pendingBatteryRequest === request) this.pendingBatteryRequest = null;
+    });
+    this.pendingBatteryRequest = request;
+    return request;
+  }
   async getTemperature() { return this.sendCommand({ cmd: 'GT' }); }
 
   async getQueryParam() { return this.sendCommand({ cmd: 'GQP' }); }
@@ -1192,6 +1202,15 @@ class BLEService {
     const str = JSON.stringify(command);
     const encoder = new TextEncoder();
     const data = encoder.encode(str);
+
+    return this.enqueueGattOperation(async () => {
+      if (!this.charCmd) return;
+      const mode = await this.writeCharacteristicValue(this.charCmd, data);
+      this.log(`TX (${mode}, ${data.byteLength}B): ${str}`, 'tx');
+    });
+  }
+
+  private enqueueGattOperation(operation: () => Promise<void>): Promise<void> {
     const queueGeneration = this.commandQueueGeneration;
 
     // Append to queue. Recover from previous write failures so reconnects are not poisoned.
@@ -1206,9 +1225,8 @@ class BLEService {
 
           if (queueGeneration !== this.commandQueueGeneration || this.intentionalUnpair) return;
 
-          const mode = await this.writeCharacteristicValue(this.charCmd, data);
+          await operation();
           this.lastCommandWriteAt = Date.now();
-          this.log(`TX (${mode}, ${data.byteLength}B): ${str}`, 'tx');
         }
       } catch (error: any) {
         this.log(`TX Failed: ${error.message}`, 'error');
@@ -1225,7 +1243,7 @@ class BLEService {
     await this.sendCommand({ cmd: 'DI' });
     await this.sendCommand({ cmd: 'GDN' });
     await this.sendCommand({ cmd: 'GRI' });
-    await this.sendCommand({ cmd: 'GB' });
+    await this.getBattery();
     await this.sendCommand({ cmd: 'GT' });
     await this.sendCommand({ cmd: 'GP' });
     await this.sendCommand({ cmd: 'GLP' });
@@ -1250,31 +1268,35 @@ class BLEService {
         this.log('Requesting batch file...', 'info');
         this.resetFileState();
         this.isFileTransferring = true;
-        
-        // Step 1: Get characteristic and start notifications
-        if (!this.charFileData) throw new Error('File Data Characteristic not found');
-        
-        await this.charFileData.startNotifications();
-        if (this.intentionalUnpair || operationGeneration !== this.commandQueueGeneration) {
-          this.resetFileState();
-          return;
-        }
-        this.charFileData.addEventListener('characteristicvaluechanged', this.boundFileHandler);
-        
-        if (this.onFileTransfer) this.onFileTransfer('request');
 
-        // Step 3: Write "send_file" to Control Characteristic
-        if (!this.charFileReq) throw new Error('File Control Characteristic not found');
-        if (this.intentionalUnpair || operationGeneration !== this.commandQueueGeneration) {
-          this.resetFileState();
-          this.charFileData.removeEventListener('characteristicvaluechanged', this.boundFileHandler);
-          return;
-        }
+        // FF03 subscription and FF02 control share the GATT operation queue
+        // with GB polling so a foreground refresh cannot collide with them.
+        await this.enqueueGattOperation(async () => {
+          // Step 1: Get characteristic and start notifications
+          if (!this.charFileData) throw new Error('File Data Characteristic not found');
         
-        const encoder = new TextEncoder();
-        const command = encoder.encode('send_file');
-        this.log('TX (FileReq): send_file', 'tx');
-        await this.charFileReq.writeValue(command);
+          await this.charFileData.startNotifications();
+          if (this.intentionalUnpair || operationGeneration !== this.commandQueueGeneration) {
+            this.resetFileState();
+            return;
+          }
+          this.charFileData.addEventListener('characteristicvaluechanged', this.boundFileHandler);
+        
+          if (this.onFileTransfer) this.onFileTransfer('request');
+
+          // Step 3: Write "send_file" to Control Characteristic
+          if (!this.charFileReq) throw new Error('File Control Characteristic not found');
+          if (this.intentionalUnpair || operationGeneration !== this.commandQueueGeneration) {
+            this.resetFileState();
+            this.charFileData.removeEventListener('characteristicvaluechanged', this.boundFileHandler);
+            return;
+          }
+        
+          const encoder = new TextEncoder();
+          const command = encoder.encode('send_file');
+          this.log('TX (FileReq): send_file', 'tx');
+          await this.charFileReq.writeValue(command);
+        });
         
     } catch (error: any) {
         this.log(`Fetch History Failed: ${error.message}`, 'error');

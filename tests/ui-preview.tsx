@@ -2,6 +2,7 @@
 /** Development-only UI fixture. Not an entry point in the production build. No hardware connection. */
 import React, { useEffect, useState, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
+import { parseBatterySnapshot } from '../utils/battery';
 import { DashboardLayout } from '../components/dashboard/DashboardLayout';
 import { LogEntry, Tag, WriteStatus, Settings } from '../types';
 import { useSettingsActions } from '../hooks/useSettingsActions';
@@ -9,8 +10,20 @@ import { DeviceCommand, SETTING_META, parseSettingReading, SettingId } from '../
 
 const sampleTags: Tag[] = Array.from({ length: 240 }, (_, i) => ({ epc: `E200001122334455${i.toString(16).toUpperCase().padStart(8, '0')}`, count: i + 5, rssi: -60 - i % 25, timestamp: Date.now() }));
 const noop = () => {};
+const batteryScenarios: Record<string, Record<string, unknown>> = {
+  Normal: {}, Charging: { charging: true }, Full: { percent: 100, full: true },
+  '99.9%': { percent: 99.9 }, 'Zero percent': { percent: 0 },
+  'High voltage': { health: 1, percent: 100, full: true }, 'Charge fault': { health: 2 },
+  'ADC check': { health: 4, percent: null, valid: false }, Unknown: { percent: null, valid: false },
+  Stale: {}, Legacy: { ver: undefined }, Unsupported: { ver: 3 }, Shutdown: { state: 'shutdown', percent: 0 },
+};
+const simulatedBattery = (scenario: string) => parseBatterySnapshot({
+  cmd: 'GB', ver: 2, voltage: 7900, state: 'NORMAL', load: 'idle', percent: 73.4,
+  valid: true, charging: false, full: false, health: 0, age_ms: 200, ...batteryScenarios[scenario],
+}, performance.now() - (scenario === 'Stale' ? 16000 : 0));
 function Preview() {
   const [connected, setConnected] = useState(false);
+  const [batteryScenario, setBatteryScenario] = useState('Normal');
   const [mode, setMode] = useState<'interactive' | 'batch' | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -23,7 +36,7 @@ function Preview() {
   const writeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (writeTimer.current) clearTimeout(writeTimer.current); }, []);
   const [history, setHistory] = useState<{ INDEX: number; EPC: string }[]>([]);
-  const [settings, setSettings] = useState<Settings>({ power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 53, qValue: 4, session: 1, scanParams: { interval: 30, dwell: 2, count: 0 }, version: 'UI-TEST', temperature: 32, batterySnapshot: { voltageMv: 7900, protectionState: 'normal', visualPercent: 73, receivedAtMs: Date.now(), stale: false }, deviceInfo: 'NHR10-TEST', deviceName: 'NHR10-TEST', deviceCanonicalId: 'UI-FIXTURE-ONLY', regionBand: { val: 'US', mode: 'template' } });
+  const [settings, setSettings] = useState<Settings>({ power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 53, qValue: 4, session: 1, scanParams: { interval: 30, dwell: 2, count: 0 }, version: 'UI-TEST', temperature: 32, batterySnapshot: parseBatterySnapshot({ cmd: 'GB', ver: 2, voltage: 7900, state: 'NORMAL', load: 'idle', percent: 73.4, valid: true, charging: false, full: false, health: 0, age_ms: 200 }), deviceInfo: 'NHR10-TEST', deviceName: 'NHR10-TEST', deviceCanonicalId: 'UI-FIXTURE-ONLY', regionBand: { val: 'US', mode: 'template' } });
   const [settingsError, setSettingsError] = useState(false);
   const [settingsTimeout, setSettingsTimeout] = useState(false);
   const simulatedReadings = useRef<Record<string, any>>({ GP: { val: 20 }, GLP: { val: 53 }, GQS: { q: 4, session: 1 }, GQP: { interval: 30, dwell: 2, times: 0 }, GTF: { val: 1 }, GDN: { val: 'NHR10-TEST' }, GF: { val: 'US', mode: 'template' } });
@@ -69,6 +82,13 @@ function Preview() {
     const timer = window.setInterval(() => log('GB: simulated battery telemetry', 'rx'), 100);
     return () => window.clearInterval(timer);
   }, [connected]);
+  useEffect(() => {
+    if (!connected) return;
+    const refresh = () => setSettings(current => ({ ...current, batterySnapshot: simulatedBattery(batteryScenario) }));
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(timer);
+  }, [connected, batteryScenario]);
   const props: React.ComponentProps<typeof DashboardLayout> = {
     status: connected ? 'connected' : 'disconnected', commandPending,
     settings, settingsActivity: settingActions.activity, onSettingsAction: settingActions.run,
@@ -82,7 +102,7 @@ function Preview() {
     onUpdateSettings: noop, onSaveSetting: noop, onFetchHistory: () => setHistory(sampleTags.map((tag, i) => ({ INDEX: i + 1, EPC: tag.epc }))), onDownloadJson: noop, onDownloadCsv: noop, onDownloadTxt: noop, onShare: noop, onClearFileData: () => setHistory([]), historyData: history,
     isBatchSaving: false, batchSaveInfo: { state: 'idle', progress: 0, written: 0, total: 0 }, onDownloadLogs: noop, onClearLogs: () => setLogs([]), isFileTransferring: false, transferProgress: 0, transferStatus: 'idle', onApplyPreset: noop, onShowPopup: () => log('Popup sent: UI fixture'),
   };
-  return <><div style={{ height: 110, padding: '8px 16px', background: '#fffbeb', color: '#92400e', fontSize: 12 }}><p>UI test fixture · Simulated data · No Bluetooth connection</p><div className="mt-1 flex gap-4"><button onClick={() => setCommandPending(!commandPending)} aria-pressed={commandPending}>Command wait</button><button onClick={() => setLost(!lost)} aria-pressed={lost}>Tag lost</button><button onClick={() => setWriteFails(!writeFails)} aria-pressed={writeFails}>Write failure</button></div><div className="mt-2 flex gap-4"><button onClick={() => setSettingsError(!settingsError)} aria-pressed={settingsError}>Settings error</button><button onClick={() => setSettingsTimeout(!settingsTimeout)} aria-pressed={settingsTimeout}>Settings timeout</button></div></div><DashboardLayout {...props} /></>;
+  return <><div style={{ height: 110, padding: '8px 16px', background: '#fffbeb', color: '#92400e', fontSize: 12 }}><p>UI test fixture · Simulated data · No Bluetooth connection</p><div className="mt-1 flex gap-4"><label>Battery <select aria-label="Simulated battery state" value={batteryScenario} onChange={event => setBatteryScenario(event.target.value)}>{Object.keys(batteryScenarios).map(value => <option key={value}>{value}</option>)}</select></label><button onClick={() => setCommandPending(!commandPending)} aria-pressed={commandPending}>Command wait</button><button onClick={() => setLost(!lost)} aria-pressed={lost}>Tag lost</button><button onClick={() => setWriteFails(!writeFails)} aria-pressed={writeFails}>Write failure</button></div><div className="mt-2 flex gap-4"><button onClick={() => setSettingsError(!settingsError)} aria-pressed={settingsError}>Settings error</button><button onClick={() => setSettingsTimeout(!settingsTimeout)} aria-pressed={settingsTimeout}>Settings timeout</button></div></div><DashboardLayout {...props} /></>;
 }
 const root = createRoot(document.getElementById('root')!);
 root.render(<Preview />);

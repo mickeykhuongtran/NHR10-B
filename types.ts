@@ -55,37 +55,27 @@ export interface RegionBandConfig {
   save?: boolean;
 }
 
-export type BatteryProtectionState = 'normal' | 'warning' | 'critical' | 'shutdown';
+export type BatteryProtectionState = 'normal' | 'warning' | 'critical' | 'shutdown' | 'unknown';
 
 export type BatteryLoadState = 'idle' | 'load';
 
-export type BatteryChargePhase =
-  | 'unknown'
-  | 'not charging'
-  | 'trickle'
-  | 'precharge'
-  | 'fast CC'
-  | 'taper CV'
-  | 'top-off'
-  | 'terminated';
-
 /**
- * Latest battery telemetry reported by the NHR-10 firmware.
- *
- * `visualPercent` is a voltage-zone gauge, not a measured state of charge.
- * The raw integer milli-unit values remain authoritative for diagnostics.
+ * GB telemetry. Percent is the firmware estimate, never derived from voltage.
+ * receivedAtMs uses performance.now(); ageMs is ADC age at notification receipt.
  */
 export interface BatterySnapshot {
-  voltageMv: number;
+  protocolVersion: number | null;
+  legacy: boolean;
+  supported: boolean;
+  voltageMv: number | null;
   protectionState: BatteryProtectionState;
   loadState?: BatteryLoadState;
-  visualPercent: number;
-  chargePhase?: BatteryChargePhase;
-  vbusMv?: number;
-  batteryCurrentMa?: number;
-  pdVoltageMv?: number;
-  pdCurrentMa?: number;
-  chargerFaultMask?: number;
+  percent: number | null;
+  valid: boolean;
+  charging: boolean | null;
+  full: boolean;
+  health: number | null;
+  ageMs: number | null;
   receivedAtMs: number;
   stale: boolean;
 }

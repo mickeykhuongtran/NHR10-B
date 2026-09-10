@@ -1,5 +1,6 @@
 import React from 'react';
-import { Battery, Bluetooth, BluetoothConnected, BluetoothOff, Thermometer } from 'lucide-react';
+import { Bluetooth, BluetoothConnected, BluetoothOff, Thermometer } from 'lucide-react';
+import { BatteryIndicator } from './ui/BatteryIndicator';
 import { ConnectionStatus, Settings } from '../types';
 
 interface HeaderProps {
@@ -10,18 +11,6 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ status, settings, onConnect, onDisconnect }) => {
-  const batterySnapshot = settings.batterySnapshot;
-  const batteryPercent = batterySnapshot && !batterySnapshot.stale
-    ? batterySnapshot.visualPercent
-    : null;
-
-  const getBatteryColor = (level: number | null) => {
-    if (level === null) return 'text-slate-500';
-    if (level > 50) return 'text-green-500';
-    if (level > 20) return 'text-yellow-500';
-    return 'text-red-500';
-  };
-
   return (
     <header className="flex items-center justify-between px-4 py-3 bg-slate-900 border-b border-slate-800 text-white shadow-md">
       <div className="flex items-center gap-3">
@@ -48,8 +37,7 @@ export const Header: React.FC<HeaderProps> = ({ status, settings, onConnect, onD
               <span>{settings.temperature}°C</span>
             </div>
             <div className="flex items-center gap-1 text-sm font-mono bg-slate-800 px-2 py-1 rounded">
-              <Battery size={16} className={getBatteryColor(batteryPercent)} />
-              <span>{batteryPercent !== null ? `${batteryPercent}%` : '--%'}</span>
+              <BatteryIndicator snapshot={settings.batterySnapshot} connected={status === 'connected'} />
             </div>
           </>
         )}
