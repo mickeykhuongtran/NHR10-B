@@ -2,8 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { bleService } from '../services/bleService';
 import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision, RegionStatusUpdate } from '../types';
 import { BATTERY_POLL_INTERVAL_MS, isBatteryShutdown, isBatterySnapshotStale, parseBatterySnapshot } from '../utils/battery';
-import { formatDeviceDisplayName } from '../utils/deviceIdentity';
-import { validateBleDeviceName } from '../utils/deviceName';
 import { isSettingsBusy, isSettingsError, parseSettingReading } from '../utils/settingsProtocol';
 import { parseProfileFormat } from '../utils/rfLinkProfile';
 
@@ -165,42 +163,19 @@ export const useRFIDConnection = () => {
 
     // 3. Settings Responses
     if (data.cmd === 'DI') {
+        const reading = parseSettingReading('device-name', data);
         const canonicalId = typeof data.id === 'string' && /^NHR10-[0-9A-F]{12}$/i.test(data.id.trim())
           ? data.id.trim().toUpperCase()
           : '';
-        const displayId = typeof data.display_id === 'string' && /^[0-9A-F]{6}$/i.test(data.display_id.trim())
-          ? data.display_id.trim().toUpperCase()
-          : '';
-        const fallbackName = typeof data.val === 'string' ? data.val.trim() : '';
-        const deviceName = formatDeviceDisplayName(bleService.getDeviceName(), displayId, fallbackName || canonicalId);
-        if (deviceName) {
+        if (reading) {
             setSettings(s => ({
                 ...s,
-                deviceInfo: s.deviceName || deviceName,
+                deviceName: String(reading.val),
+                deviceInfo: String(reading.val),
                 deviceCanonicalId: canonicalId,
+                syncRevision: bumpSettingsSyncRevision(s, 'deviceName'),
                 ...(typeof data.fw === 'string' && data.fw.trim() ? { version: data.fw.trim() } : {}),
             }));
-        }
-    }
-    const deviceNameResponseIsError = ['err', 'error'].includes(String(data.status ?? '').toLowerCase()) || data.ok === false;
-    if (
-        (data.cmd === 'GDN' && !deviceNameResponseIsError) ||
-        (data.cmd === 'SDN' && !deviceNameResponseIsError && typeof data.val === 'string')
-    ) {
-        if (typeof data.val !== 'string') {
-            addLog(`${data.cmd} response is missing string val`, 'error');
-        } else {
-            const validation = validateBleDeviceName(data.val);
-            if (!validation.valid) {
-                addLog(`Ignored invalid ${data.cmd} device name: ${validation.error}`, 'error');
-            } else {
-                setSettings(s => ({
-                    ...s,
-                    deviceName: data.val,
-                    deviceInfo: data.val,
-                    syncRevision: bumpSettingsSyncRevision(s, 'deviceName'),
-                }));
-            }
         }
     }
     if (data.cmd === 'GRI') {
@@ -351,25 +326,18 @@ export const useRFIDConnection = () => {
       // The initialization sequence below explicitly requests one GB snapshot.
       lastBatteryPollAtRef.current = performance.now();
       const identity = bleService.getDeviceIdentity();
-      const deviceLabel = formatDeviceDisplayName(
-        bleService.getDeviceName(),
-        identity?.displayId,
-        identity?.canonicalId,
-      );
-      if (deviceLabel) {
+      if (identity) {
         setSettings(s => ({
           ...s,
-          deviceInfo: deviceLabel,
-          deviceCanonicalId: identity?.canonicalId ?? '',
-          ...(identity?.firmware ? { version: identity.firmware } : {}),
+          deviceCanonicalId: identity.canonicalId,
+          ...(identity.firmware ? { version: identity.firmware } : {}),
         }));
       }
       setStatus('connected');
       setConnectionRevision(revision => revision + 1);
-      addLog(`Connected to ${deviceLabel || 'NHR-10'}`, 'info');
+      addLog(`Connected to ${identity?.canonicalId || 'NHR-10'}`, 'info');
       
-      // Init Settings
-      await bleService.getDeviceInfo();
+      // DI and configuration reads run through App's settings coordinator.
       await bleService.getInfo();
       lastBatteryPollAtRef.current = performance.now();
       await bleService.getBattery();

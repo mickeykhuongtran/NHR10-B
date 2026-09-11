@@ -1,11 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { AlertTriangle, SlidersHorizontal } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { RegionBandSelection, Settings as SettingsType } from '../../types';
 import { SettingsActivity } from '../../hooks/useSettingsActions';
 import { SettingsRequest } from '../../utils/settingsProtocol';
 import { PageHeader } from './PageHeader';
-import { BLE_DEVICE_NAME_MAX_BYTES, validateBleDeviceName } from '../../utils/deviceName';
 import { parseProfileFormat, profileOptions } from '../../utils/rfLinkProfile';
 import { describeRegion, isRegionPreset, REGION_PRESETS, regionChannelCenters, formatRegionMHz } from '../../utils/regionBand';
 
@@ -39,16 +38,16 @@ type SettingsAction = () => void | Promise<void>;
 
 // Keep the component identity stable across telemetry and pending-state renders.
 const ActionRow = ({ id, onGet, onSet, setDisabled = false, activity, locked }: {
-  id: string; onGet: SettingsAction; onSet: SettingsAction; setDisabled?: boolean;
+  id: string; onGet: SettingsAction; onSet?: SettingsAction; setDisabled?: boolean;
   activity: SettingsActivity | null; locked: boolean;
 }) => {
   const pending = activity !== null;
   const active = activity?.id === id;
   const invoke = (action: SettingsAction) => { if (!locked && !pending) void action(); };
   return <div className="mt-3">
-    <div className="grid grid-cols-2 gap-2">
+    <div className={`grid ${onSet ? 'grid-cols-2' : 'grid-cols-1'} gap-2`}>
       <Button onClick={() => invoke(onGet)} disabled={locked} aria-disabled={locked || pending} aria-busy={active && activity.mode === 'read'} variant="secondary" size="sm" className={COMPACT_BUTTON_CLASS}>Read</Button>
-      <Button onClick={() => { if (!setDisabled) invoke(onSet); }} disabled={locked || setDisabled} aria-disabled={locked || pending || setDisabled} aria-busy={active && activity.mode === 'apply'} variant="primary" size="sm" className={COMPACT_BUTTON_CLASS}>Apply</Button>
+      {onSet && <Button onClick={() => { if (!setDisabled) invoke(onSet); }} disabled={locked || setDisabled} aria-disabled={locked || pending || setDisabled} aria-busy={active && activity.mode === 'apply'} variant="primary" size="sm" className={COMPACT_BUTTON_CLASS}>Apply</Button>}
     </div>
     <p className="mt-2 h-5 text-xs text-blue-700" role="status">{active ? activity.phase + '…' : ''}</p>
   </div>;
@@ -109,7 +108,6 @@ const RegionSelectField = ({ value, onChange }: {
 
 export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy, settings, activity, onAction }: SettingsTabProps) {
   const [power, setPower] = useState(settings.power);
-  const [deviceName, setDeviceName] = useState(settings.deviceName);
   const [profile, setProfile] = useState(settings.linkProfile);
   const profileFormat = parseProfileFormat(settings.linkProfileFormat);
   const profileConfirmed = isConnected && settings.linkProfileConfirmed === true;
@@ -127,7 +125,6 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const actionRowProps = { activity, locked: !isConnected || isBusy };
   const [confirmSave, setConfirmSave] = useState(false);
   const powerSyncRevision = settings.syncRevision?.power ?? 0;
-  const deviceNameSyncRevision = settings.syncRevision?.deviceName ?? 0;
   const profileSyncRevision = settings.syncRevision?.linkProfile ?? 0;
   const qSessionSyncRevision = settings.syncRevision?.qSession ?? 0;
   const queryParamsSyncRevision = settings.syncRevision?.queryParams ?? 0;
@@ -137,10 +134,6 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   useEffect(() => {
     setPower(settings.power);
   }, [settings.power, powerSyncRevision]);
-
-  useEffect(() => {
-    setDeviceName(settings.deviceName);
-  }, [deviceNameSyncRevision, settings.deviceName]);
 
   useEffect(() => {
     setProfile(settings.linkProfile);
@@ -177,7 +170,6 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const handleGetPower = () => onAction({ id: 'power', mode: 'read' });
   const handleSetPower = () => onAction({ id: 'power', mode: 'apply', value: power });
   const handleGetDeviceName = () => onAction({ id: 'device-name', mode: 'read' });
-  const handleSetDeviceName = () => onAction({ id: 'device-name', mode: 'apply', value: deviceName });
   const handleGetProfile = () => onAction({ id: 'profile', mode: 'read' });
   const handleSetProfile = () => { if (profile !== null && profileConfirmed) return onAction({ id: 'profile', mode: 'apply', value: profile }); };
   const handleGetQSession = () => onAction({ id: 'q-session', mode: 'read' });
@@ -188,7 +180,6 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const handleSetTagFocus = () => onAction({ id: 'tag-focus', mode: 'apply', value: tagFocus });
   const handleGetRegion = () => onAction({ id: 'region-band', mode: 'read' });
   const adjustPower = (delta: number) => setPower((current) => clampNumber(current + delta, 0, 30));
-  const deviceNameValidation = useMemo(() => validateBleDeviceName(deviceName), [deviceName]);
   const handleSetRegion = () => {
     if (!regionWritable || !isRegionPreset(regionSelection)) return;
     return onAction({ id: 'region-band', mode: 'apply', value: { selection: regionSelection, save: saveRegion } });
@@ -237,35 +228,13 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
           actionId="device-name"
           activeActionKey={activeActionKey}
           title="Bluetooth Device Name"
-          subtitle="GAP + advertising · persistent"
+          subtitle="Current device name · read only"
           className=""
         >
-          <div>
-            <FieldLabel>Name</FieldLabel>
-            <input
-              type="text"
-              id="setting-name" value={deviceName}
-              onChange={(event) => setDeviceName(event.target.value)}
-              aria-invalid={!deviceNameValidation.valid}
-              autoComplete="off"
-              spellCheck={false}
-              className={`${FIELD_CLASS} font-mono ${!deviceNameValidation.valid ? 'border-[#FF3B30]/60' : ''}`}
-            />
-            <div className="mt-1.5 flex flex-wrap items-start justify-between gap-x-3 gap-y-1 text-xs font-semibold">
-              <span className={deviceNameValidation.valid ? 'text-[#527176]' : 'text-[#C32118]'}>
-                {deviceNameValidation.error ?? 'Applied after disconnect and the next advertising cycle'}
-              </span>
-              <span className={`shrink-0 font-mono ${deviceNameValidation.byteLength > BLE_DEVICE_NAME_MAX_BYTES ? 'text-[#C32118]' : 'text-[#527176]'}`}>
-                {deviceNameValidation.byteLength}/{BLE_DEVICE_NAME_MAX_BYTES} UTF-8 bytes
-              </span>
-            </div>
-          </div>
-          <ActionRow {...actionRowProps}
-            id="device-name"
-            onGet={handleGetDeviceName}
-            onSet={handleSetDeviceName}
-            setDisabled={!deviceNameValidation.valid}
-          />
+          <p className="min-h-11 break-words rounded-lg border border-slate-200 bg-white px-3 py-3 font-mono text-sm text-slate-800">
+            {isConnected && settings.deviceName ? settings.deviceName : 'Not read from device'}
+          </p>
+          <ActionRow {...actionRowProps} id="device-name" onGet={handleGetDeviceName} />
         </SettingsCard>
 
         <SettingsCard

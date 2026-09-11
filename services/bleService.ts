@@ -1,5 +1,4 @@
 import { ConnectionStatus } from '../types';
-import { assertValidBleDeviceName } from '../utils/deviceName';
 import { assertProfileId } from '../utils/rfLinkProfile';
 import { prepareRegionApply } from '../utils/regionBand';
 
@@ -1081,13 +1080,6 @@ class BLEService {
   // --- Command Helpers ---
 
   async getDeviceInfo() { return this.sendCommand({ cmd: 'DI' }); }
-  async getConfiguredDeviceName() { return this.sendCommand({ cmd: 'GDN' }); }
-  async setConfiguredDeviceName(name: string) {
-    assertValidBleDeviceName(name);
-    // Passing an object to JSON.stringify in sendCommand preserves quotes,
-    // backslashes, and other legal JSON characters without manual escaping.
-    return this.sendCommand({ cmd: 'SDN', val: name });
-  }
   async getInfo() { return this.sendCommand({ cmd: 'GRI' }); }
   async getPower() { return this.sendCommand({ cmd: 'GP' }); }
   async getProfile() { return this.sendCommand({ cmd: 'GLP' }); }

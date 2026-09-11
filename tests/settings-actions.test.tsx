@@ -26,7 +26,7 @@ it.each<[SettingId, object, string]>([
   ['q-session', { cmd: 'GQS', q: 4, session: 1 }, 'Q 4, session S1'],
   ['query-params', { cmd: 'GQP', interval: 30, dwell: 2, times: 0 }, 'interval 30 ms'],
   ['tag-focus', { cmd: 'GTF', val: 1 }, 'On'],
-  ['device-name', { cmd: 'GDN', val: 'NHR10-DEMO' }, 'NHR10-DEMO'],
+  ['device-name', { cmd: 'DI', val: 'NHR-10' }, 'NHR-10'],
   ['region-band', { cmd: 'GF', status: 'ok', val: 'US', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 }, 'US'],
 ])('waits for a valid %s response before notifying Read successful', async (id, response, value) => {
   await start({ id, mode: 'read' });
@@ -214,13 +214,33 @@ it('does not accept a value-only SLP as a saved acknowledgement', async () => {
   expect(log).toHaveBeenLastCalledWith(expect.any(String), 'error', expect.objectContaining({ title: 'Apply not confirmed' }));
 });
 
-it('consumes a late legacy SDN ACK without scheduling a second GET or finishing verification', async () => {
+it('reads Bluetooth name with DI and ignores legacy name replies and missing values', async () => {
+  await start({ id: 'device-name', mode: 'read' });
+  expect(ble.sendCommand).toHaveBeenCalledExactlyOnceWith({ cmd: 'DI' });
+  for (const response of [
+    { cmd: 'GDN', val: 'Old name' }, { cmd: 'SDN', status: 'ok', val: 'Old name' },
+    { cmd: 'DI', status: 'ok' }, { cmd: 'DI', val: '' }, { cmd: 'DI', val: 123 },
+  ]) {
+    await receive(response);
+    expect(actions.activity?.phase).toBe('Reading'); expect(log).not.toHaveBeenCalled();
+  }
+  await receive({ cmd: 'DI', val: 'NHR-10' });
+  expect(ble.sendCommand).toHaveBeenCalledOnce();
+  expect(log).toHaveBeenLastCalledWith('Bluetooth device name: NHR-10.', 'info', expect.objectContaining({ title: 'Read successful' }));
+});
+
+it.each(['error', 'timeout'])('does not report success when DI returns %s', async failure => {
+  await start({ id: 'device-name', mode: 'read' });
+  if (failure === 'error') await receive({ cmd: 'DI', status: 'err', error: 'unsupported_command', val: 'NHR-10' });
+  else await advance(SETTINGS_READ_TIMEOUT_MS);
+  expect(log).toHaveBeenLastCalledWith(expect.stringContaining('DI'), 'error', expect.objectContaining({ title: 'Read not confirmed' }));
+  expect(actions.activity).toBeNull();
+  expect(ble.sendCommand).toHaveBeenCalledOnce();
+});
+
+it('rejects a legacy name Apply request without sending a BLE command', async () => {
+  // @ts-expect-error Bluetooth name is read-only, including for stale callers at runtime.
   await start({ id: 'device-name', mode: 'apply', value: 'NHR10-TEST' });
-  await advance(SETTINGS_ACK_TIMEOUT_MS);
-  expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SDN', 'GDN']);
-  let handled = false;
-  await act(async () => { handled = actions.handleDataReceived({ cmd: 'SDN', status: 'ok', val: 'NHR10-TEST' }); });
-  expect(handled).toBe(true); expect(actions.activity?.phase).toBe('Verifying');
-  await receive({ cmd: 'GDN', val: 'NHR10-TEST' });
-  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'info', expect.objectContaining({ title: 'Applied and verified' }));
+  expect(ble.sendCommand).not.toHaveBeenCalled();
+  expect(log).toHaveBeenLastCalledWith(expect.stringContaining('read-only'), 'error', expect.objectContaining({ title: 'Apply not confirmed' }));
 });

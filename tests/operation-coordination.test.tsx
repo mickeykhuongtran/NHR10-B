@@ -124,7 +124,7 @@ it.each([
 });
 it('reads GLP first on every reconnect and waits for each setting response before the next request', async () => {
   const replies = [
-    { cmd: 'GLP', val: 13, format: 2 }, { cmd: 'GDN', val: 'NHR10-TEST' }, { cmd: 'GP', val: 20 },
+    { cmd: 'GLP', val: 13, format: 2 }, { cmd: 'DI', val: 'NHR-10' }, { cmd: 'GP', val: 20 },
     { cmd: 'GQS', val: '6,255' }, { cmd: 'GQP', val: '30,2,0' }, { cmd: 'GTF', val: 1 }, { cmd: 'GF', status: 'ok', val: 'US', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 },
   ];
   for (let revision = 1; revision <= 2; revision++) {
@@ -139,4 +139,11 @@ it('reads GLP first on every reconnect and waits for each setting response befor
     }
     expect(captured.settingsActivity).toBeNull();
   }
+});
+
+it('ignores unsolicited legacy rename replies without logging saved or issuing a GET', async () => {
+  await settingsReply({ cmd: 'SDN', status: 'ok', val: 'Old name' });
+  await settingsReply({ cmd: 'GDN', status: 'ok', val: 'Old name' });
+  expect(mocks.ble.sendCommand).not.toHaveBeenCalled();
+  expect(mocks.addLog).not.toHaveBeenCalled();
 });

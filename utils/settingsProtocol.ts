@@ -1,11 +1,9 @@
 import { RegionBandConfig, RegionBandSelection } from '../types';
-import { assertValidBleDeviceName } from './deviceName';
 import { assertProfileId, parseProfileFormat, parseProfileId } from './rfLinkProfile';
 import { describeRegion, parseRegionReading, prepareRegionApply } from './regionBand';
 
 export interface SettingValues {
   power: number;
-  'device-name': string;
   profile: number;
   baseband: { profile: number; q: number; session: number; target: number };
   'q-session': { q: number; session: number };
@@ -13,15 +11,15 @@ export interface SettingValues {
   'tag-focus': boolean;
   'region-band': { selection: RegionBandSelection; save: boolean };
 }
-export type SettingId = keyof SettingValues;
+export type SettingId = keyof SettingValues | 'device-name';
 export type SettingsRequest = { id: SettingId; mode: 'read' }
-  | { [K in SettingId]: { id: K; mode: 'apply'; value: SettingValues[K] } }[SettingId]
+  | { [K in keyof SettingValues]: { id: K; mode: 'apply'; value: SettingValues[K] } }[keyof SettingValues]
   | { id: 'config'; mode: 'save' };
 export type SettingReading = Record<string, string | number | boolean | null>;
 export type DeviceCommand = { cmd: string; [key: string]: unknown };
-export const SETTING_META: Record<SettingId, { title: string; get: string; set: string; setReplies: string[] }> = {
+export const SETTING_META: Record<SettingId, { title: string; get: string; set?: string; setReplies: string[] }> = {
   power: { title: 'RF power', get: 'GP', set: 'SP', setReplies: ['SP'] },
-  'device-name': { title: 'Bluetooth device name', get: 'GDN', set: 'SDN', setReplies: ['SDN'] },
+  'device-name': { title: 'Bluetooth device name', get: 'DI', setReplies: [] },
   profile: { title: 'RF link profile', get: 'GLP', set: 'SLP', setReplies: ['SLP'] },
   baseband: { title: 'RF preset', get: 'GRP', set: 'SRP', setReplies: ['SRP'] },
   'q-session': { title: 'EPC Gen2', get: 'GQS', set: 'SQS', setReplies: ['SQS'] },
@@ -58,7 +56,7 @@ export function parseSettingReading(id: SettingId, data: any): SettingReading | 
       return profile === null || q === null || session === null || target === null ? null : { profile, q, session, target, format: parseProfileFormat(data.format) };
     }
     case 'device-name': {
-      try { assertValidBleDeviceName(data.val); return { val: data.val }; } catch { return null; }
+      return typeof data.val === 'string' && data.val.trim() ? { val: data.val } : null;
     }
     case 'tag-focus': { const val = integer(data.val, 0, 1); return val === null ? null : { val }; }
     case 'q-session': {
@@ -94,6 +92,7 @@ export function describeSetting(id: SettingId, reading: SettingReading): string 
 
 export function prepareSettingApply(request: Extract<SettingsRequest, { mode: 'apply' }>): { command: DeviceCommand; expected: SettingReading } {
   const cmd = SETTING_META[request.id].set;
+  if (!cmd) throw new Error('This setting is read-only.');
   switch (request.id) {
     case 'power': return { command: { cmd, val: request.value }, expected: { val: request.value } };
     case 'profile': assertProfileId(request.value); return { command: { cmd, val: request.value }, expected: { val: request.value } };
@@ -103,7 +102,6 @@ export function prepareSettingApply(request: Extract<SettingsRequest, { mode: 'a
       if (integer(q, 0, 15) === null || ![0, 1, 2, 3, 255].includes(session) || ![0, 1].includes(target)) throw new Error('Invalid Q, session or target.');
       return { command: { cmd, val: `${profile},${q},${session},${target}` }, expected: request.value };
     }
-    case 'device-name': assertValidBleDeviceName(request.value); return { command: { cmd, val: request.value }, expected: { val: request.value } };
     case 'tag-focus': return { command: { cmd, val: request.value ? 1 : 0 }, expected: { val: request.value ? 1 : 0 } };
     case 'q-session': return { command: { cmd, val: `${request.value.q},${request.value.session}` }, expected: request.value };
     case 'query-params': return { command: { cmd, val: `${request.value.interval},${request.value.dwell},${request.value.append}` }, expected: request.value };

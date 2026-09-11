@@ -5,7 +5,7 @@ import { useRFIDConnection } from '../hooks/useRFIDConnection';
 import { batteryView } from '../utils/battery';
 
 const ble = vi.hoisted(() => Object.fromEntries([
-  'connect', 'disconnect', 'getDeviceIdentity', 'getDeviceName', 'getDeviceInfo', 'getConfiguredDeviceName',
+  'connect', 'disconnect', 'getDeviceIdentity', 'getDeviceName', 'getDeviceInfo',
   'getInfo', 'getBattery', 'getPower', 'getProfile', 'getQSession', 'getQueryParam', 'getTagFocus',
   'getRegion', 'getTemperature', 'getSettings', 'isIntentionalUnpairPending', 'recoverFromUnexpectedLinkTimeout',
 ].map(name => [name, vi.fn()])));

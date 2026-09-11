@@ -4,6 +4,38 @@ import { expect, it, vi } from 'vitest';
 import { useRFIDConnection } from '../hooks/useRFIDConnection';
 
 vi.mock('../services/bleService', () => ({ bleService: {} }));
+
+it('uses DI.val for the current name, preserves it without rename limits, and clears it on reconnect', () => {
+  let connection!: ReturnType<typeof useRFIDConnection>;
+  function Harness() { connection = useRFIDConnection(); return null; }
+  const root = createRoot(document.createElement('div'));
+  act(() => root.render(<Harness />));
+  try {
+    act(() => connection.handleDataReceived({ cmd: 'DI', val: 'NHR-10', id: 'NHR10-AABBCCDDEEFF', display_id: 'DDEEFF', fw: 'REVB' }));
+    expect(connection.settings).toMatchObject({ deviceName: 'NHR-10', deviceInfo: 'NHR-10', deviceCanonicalId: 'NHR10-AABBCCDDEEFF', version: 'REVB' });
+    const revision = connection.settings.syncRevision!.deviceName;
+    for (const data of [
+      { cmd: 'GDN', val: 'Cached name' }, { cmd: 'SDN', status: 'ok', val: 'Cached name' },
+      { cmd: 'DI', status: 'err', val: 'Rejected' }, { cmd: 'DI', status: 'busy', val: 'Busy' },
+      { cmd: 'DI', ok: false, val: 'Rejected' }, { cmd: 'DI' }, { cmd: 'DI', val: 123 }, { cmd: 'DI', val: ' ' },
+    ]) {
+      act(() => connection.handleDataReceived(data));
+      expect(connection.settings.deviceName).toBe('NHR-10');
+      expect(connection.settings.syncRevision!.deviceName).toBe(revision);
+    }
+    const name = 'Thiết bị NHR-10 REVB';
+    act(() => connection.handleDataReceived({ cmd: 'DI', val: name }));
+    expect(connection.settings).toMatchObject({ deviceName: name, deviceInfo: name });
+    expect(connection.settings.syncRevision!.deviceName).toBe(revision + 1);
+    act(() => connection.handleConnectionStatusChange('connecting'));
+    expect(connection.settings).toMatchObject({ deviceName: '', deviceInfo: '', deviceCanonicalId: '' });
+    act(() => connection.handleDataReceived({ cmd: 'DI', val: 'NHR-10' }));
+    expect(connection.settings.deviceName).toBe('NHR-10');
+    act(() => connection.handleConnectionStatusChange('disconnected'));
+    expect(connection.settings.deviceName).toBe('');
+  } finally { act(() => root.unmount()); }
+});
+
 it('does not turn Tag Focus off on a status-only ACK, missing value or device error', () => {
   let connection!: ReturnType<typeof useRFIDConnection>;
   function Harness() { connection = useRFIDConnection(); return null; }

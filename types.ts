@@ -110,7 +110,7 @@ export interface Settings {
   batterySnapshot: BatterySnapshot | null;
   /** Short, human-readable name shown in the UI (for example NHR10-8658A8). */
   deviceInfo: string;
-  /** Exact UTF-8 GAP/advertising name returned by GDN. */
+  /** Current Bluetooth name returned by DI; read-only, cleared on disconnect. */
   deviceName: string;
   /** Full identity verified from the firmware DI response; never used as the primary label. */
   deviceCanonicalId: string;

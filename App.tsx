@@ -178,24 +178,6 @@ const handleDataReceived = useCallback((data: any) => {
     if (['GF', 'SF'].includes(data.cmd) && data.status === 'err' && !handledSettingsReply) {
       connection.addLog(`Region response: ${data.error ?? data.msg ?? data.code ?? 'unknown_error'}`, 'error');
     }
-
-    if (data.cmd === 'SDN' && !handledSettingsReply) {
-      const status = String(data.status ?? '').toLowerCase();
-      if (status === 'err' || status === 'error' || data.ok === false) {
-        connection.addLog(`Bluetooth name update failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
-      } else {
-        connection.addLog('Bluetooth name saved; disconnect to publish it in the next advertising cycle', 'info');
-        // Re-read the persisted value instead of trusting an optimistic UI update.
-        void bleService.getConfiguredDeviceName().catch((error) => connection.addLog(`Device name sync failed: ${error.message}`, 'error'));
-      }
-    }
-
-    if (data.cmd === 'GDN' && !handledSettingsReply) {
-      const status = String(data.status ?? '').toLowerCase();
-      if (status === 'err' || status === 'error' || data.ok === false) {
-        connection.addLog(`Bluetooth name read failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
-      }
-    }
   }, [connection, scan, locate, markBatchSaving, clearBatchSaving, finishWrite, settingsActions.handleDataReceived]);
 
   useEffect(() => {
@@ -261,7 +243,6 @@ const handleDataReceived = useCallback((data: any) => {
   const handleRefreshSettings = async () => {
     await runOperation(async () => {
       await refreshSettings();
-      await bleService.getDeviceInfo();
       await bleService.getInfo();
       await bleService.getBattery();
       await bleService.getTemperature();

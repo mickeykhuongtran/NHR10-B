@@ -21,7 +21,7 @@ const unsupportedCommand = (error: unknown) => error instanceof SettingsDeviceEr
   .some(value => /^(unsupported|not_supported|unsupported_command|unknown_command|unknown_cmd|invalid_command)$/i.test(String(value)));
 const sendBleCommand = (command: DeviceCommand) => bleService.sendCommand(command);
 const noOp = () => {};
-const configCommands = new Set(Object.values(SETTING_META).flatMap(meta => [meta.get, meta.set]));
+const configCommands = new Set(Object.values(SETTING_META).flatMap(meta => meta.set ? [meta.get, meta.set] : [meta.get]));
 
 export function useSettingsActions(
   addLog: (message: string, type: LogEntry['type'], notice?: LogEntry['notice']) => void,
@@ -222,8 +222,7 @@ export function useSettingsActions(
       if (expected && !Object.entries(expected).every(([key, value]) => reading[key] === value)) {
         throw new Error(`Read-back differs from the requested value. Reader reports ${description}. Review the setting before retrying.`);
       }
-      const renameNote = request.id === 'device-name' && request.mode === 'apply' ? ' The advertising name changes after disconnect.' : '';
-      if (!silent) addLog(`${title}: ${description}.${renameNote}`, 'info', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read successful' : regionWrite ? (request.value.save ? 'Đã lưu' : 'Đã áp dụng tạm thời') : rfWrite ? 'Đã lưu' : 'Applied and verified' });
+      if (!silent) addLog(`${title}: ${description}.`, 'info', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read successful' : regionWrite ? (request.value.save ? 'Đã lưu' : 'Đã áp dụng tạm thời') : rfWrite ? 'Đã lưu' : 'Applied and verified' });
       return true;
     } catch (error) {
       if (mounted.current) addLog(`${title}: ${error instanceof Error ? error.message : 'Device command failed.'}`, 'error', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read not confirmed' : request.mode === 'save' ? 'Save not confirmed' : 'Apply not confirmed' });

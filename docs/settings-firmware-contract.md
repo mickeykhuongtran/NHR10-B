@@ -1,6 +1,6 @@
 # Device settings: frontend fixes and firmware response contract
 
-RF Link Profile and Region contracts updated on 2026-09-11 from the device owner’s NHR-10 REVB specifications. See [Region integration](region-firmware-contract.md) for the implemented GF/SF behavior. This update changes only the web controller. The non-profile firmware observations below are historical: the previous investigation inspected `D:/Firmware-Develop/NHR-10-REVC` (firmware 2.8); they have not been reverified against the new REVB firmware.
+RF Link Profile, Region and Bluetooth name contracts updated on 2026-09-11 from the device owner’s NHR-10 REVB specifications. See [Region integration](region-firmware-contract.md) for the implemented GF/SF behavior. This update changes only the web controller. Observations in the historical support section below come from the previous investigation of `D:/Firmware-Develop/NHR-10-REVC` (firmware 2.8); they have not been reverified against the new REVB firmware.
 
 ## Fixed in the web controller
 
@@ -45,6 +45,19 @@ Every connection/reconnection starts a new GLP read. Cached IDs are shown as unc
 
 Automated tests simulate these reply paths and connection changes. They do not verify real RF behavior, flash writes or physical power-cycle retention.
 
+## Bluetooth name: current REVB contract
+
+The name is read-only. Device settings shows the current name and a Read button; the rename input and Apply button have been removed. The web sends `DI` and displays its string `val` directly, without preferring a cached browser advertising name or substituting a compact identity label.
+
+```json
+{"cmd":"DI"}
+{"cmd":"DI","val":"NHR-10"}
+```
+
+Confirmed against `D:/Firmware-Develop/NHR-10-REVB-FINAL/components/ble_service/ble_command_protocol.c`: DI returns `BLE_DEVICE_NAME` in `val`. The web retains optional canonical identity metadata separately for firmware that supplies it. Bluetooth name reads use the existing sequential settings coordinator and 5-second GET timeout; missing/invalid values or error replies cannot report Read successful. The name is cleared when the link is lost, and each connection/reconnection requests a fresh DI. Diagnostics refresh also reads DI through the coordinator.
+
+The web no longer sends GDN/SDN or handles old rename acknowledgements as saved. The read-only name has no former 14-byte rename limit. Device settings request types exclude name Apply, and the command builder also rejects stale Apply callers at runtime.
+
 ## Historical non-profile firmware support
 
 | Setting | Read request / successful reply | Apply request / current acknowledgement |
@@ -53,7 +66,6 @@ Automated tests simulate these reply paths and connection changes. They do not v
 | Q / Session | `GQS` → `GQS` with `q`, `session` | `SQS` → `SQS`, `status: ok` |
 | Query parameters | `GQP` → `GQP` with `interval` in ms, `dwell`, `times` | `SQP` → `SQP`, `status: ok` |
 | Tag Focus | `GTF` → `GTF` with `val: 0/1` | `TF` → `TF`, `status: ok`, without a value |
-| Bluetooth name | `GDN` → `GDN` with string `val` | `SDN` → `SDN`, `status: ok`, string `val` |
 
 In the previously inspected firmware, the GET extended-parameter error response is `GCFG`, not the originating `GQS/GQP/GTF`. The frontend accepts this error during its serialized extended-parameter transaction. The corresponding firmware handlers are in `components/ble_service/ble_command_protocol.c` and `components/rfid_module/rfid_module.c`.
 

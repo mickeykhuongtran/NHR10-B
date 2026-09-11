@@ -41,7 +41,7 @@ function Preview() {
   const [settings, setSettings] = useState<Settings>({ power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 15, linkProfileFormat: 2, linkProfileConfirmed: true, qValue: 4, session: 1, scanParams: { interval: 30, dwell: 2, count: 0 }, version: 'UI-TEST', temperature: 32, batterySnapshot: parseBatterySnapshot({ cmd: 'GB', ver: 2, voltage: 7900, state: 'NORMAL', load: 'idle', percent: 73.4, valid: true, charging: false, full: false, health: 0, age_ms: 200 }), deviceInfo: 'NHR10-TEST', deviceName: 'NHR10-TEST', deviceCanonicalId: 'UI-FIXTURE-ONLY', regionBandConfirmed: false, regionBandSupport: 'unknown' });
   const [settingsError, setSettingsError] = useState(false);
   const [settingsTimeout, setSettingsTimeout] = useState(false);
-  const simulatedReadings = useRef<Record<string, any>>({ GP: { val: 20 }, GLP: { val: 15, format: 2 }, GQS: { q: 4, session: 1 }, GQP: { interval: 30, dwell: 2, times: 0 }, GTF: { val: 1 }, GDN: { val: 'NHR10-TEST' }, GF: { status: 'ok', val: 'US', mode: 'template', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 } });
+  const simulatedReadings = useRef<Record<string, any>>({ GP: { val: 20 }, GLP: { val: 15, format: 2 }, GQS: { q: 4, session: 1 }, GQP: { interval: 30, dwell: 2, times: 0 }, GTF: { val: 1 }, DI: { val: 'NHR-10' }, GF: { status: 'ok', val: 'US', mode: 'template', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 } });
   const settingsTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   useEffect(() => () => settingsTimers.current.forEach(clearTimeout), []);
   const log = (message: string, type: LogEntry['type'] = 'info', notice?: LogEntry['notice']) => setLogs(current => [...current, { message, type, timestamp: Date.now(), notice }].slice(-1000));
@@ -72,7 +72,7 @@ function Preview() {
       if (id) {
         const reading = parseSettingReading(id, response);
         if (reading) setSettings(current => ({ ...current,
-          ...(id === 'power' ? { power: Number(reading.val) } : id === 'profile' ? { linkProfile: Number(reading.val), linkProfileFormat: response.format ?? null, linkProfileConfirmed: true } : id === 'tag-focus' ? { tagFocus: reading.val === 1 } : id === 'q-session' ? { qValue: Number(reading.q), session: Number(reading.session) } : id === 'query-params' ? { scanParams: { interval: Number(reading.interval), dwell: Number(reading.dwell), append: Number(reading.append), count: Number(reading.append) } } : id === 'device-name' ? { deviceName: String(reading.val) } : {}),
+          ...(id === 'power' ? { power: Number(reading.val) } : id === 'profile' ? { linkProfile: Number(reading.val), linkProfileFormat: response.format ?? null, linkProfileConfirmed: true } : id === 'tag-focus' ? { tagFocus: reading.val === 1 } : id === 'q-session' ? { qValue: Number(reading.q), session: Number(reading.session) } : id === 'query-params' ? { scanParams: { interval: Number(reading.interval), dwell: Number(reading.dwell), append: Number(reading.append), count: Number(reading.append) } } : id === 'device-name' ? { deviceName: String(reading.val), deviceInfo: String(reading.val) } : {}),
         }));
       }
       log(`RX: ${JSON.stringify(response)}`, 'rx');

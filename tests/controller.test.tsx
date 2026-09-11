@@ -50,6 +50,23 @@ const fixture = (): React.ComponentProps<typeof DashboardLayout> => ({
   isFileTransferring: false, transferProgress: 0, transferStatus: 'idle', onApplyPreset: vi.fn(), onShowPopup: vi.fn(),
 });
 
+it('shows the current Bluetooth name with a Read button and no rename controls', () => {
+  const props = fixture(); props.status = 'connected'; props.settings.deviceName = 'NHR-10';
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const card = () => container.querySelector<HTMLElement>('section[aria-label="Bluetooth Device Name"]')!;
+  expect(card().textContent).toContain('NHR-10');
+  expect(card().querySelectorAll('input')).toHaveLength(0);
+  expect([...card().querySelectorAll('button')].map(b => b.textContent)).toEqual(['Read']);
+  act(() => card().querySelector('button')!.click());
+  expect(props.onSettingsAction).toHaveBeenCalledExactlyOnceWith({ id: 'device-name', mode: 'read' });
+  render(<DashboardLayout {...props} settings={{ ...props.settings, deviceName: 'Name from DI' }} />);
+  expect(card().textContent).toContain('Name from DI');
+  render(<DashboardLayout {...props} status="disconnected" />);
+  expect(card().textContent).toContain('Not read from device');
+  act(() => card().querySelector('button')!.click());
+  expect(props.onSettingsAction).toHaveBeenCalledOnce();
+});
+
 it('starts with the EPC inventory focused and keeps optional guidance and engineering tools collapsed', () => {
   render(<DashboardLayout {...fixture()} />);
   expect(container.querySelector('h1')?.textContent).toBe('Scan tags');
