@@ -27,7 +27,7 @@ it.each<[SettingId, object, string]>([
   ['query-params', { cmd: 'GQP', interval: 30, dwell: 2, times: 0 }, 'interval 30 ms'],
   ['tag-focus', { cmd: 'GTF', val: 1 }, 'On'],
   ['device-name', { cmd: 'GDN', val: 'NHR10-DEMO' }, 'NHR10-DEMO'],
-  ['region-band', { cmd: 'GF', mode: 'template', val: 'US' }, 'US'],
+  ['region-band', { cmd: 'GF', status: 'ok', val: 'US', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 }, 'US'],
 ])('waits for a valid %s response before notifying Read successful', async (id, response, value) => {
   await start({ id, mode: 'read' });
   expect(actions.activity?.phase).toBe('Reading'); expect(log).not.toHaveBeenCalled();

@@ -125,7 +125,7 @@ it.each([
 it('reads GLP first on every reconnect and waits for each setting response before the next request', async () => {
   const replies = [
     { cmd: 'GLP', val: 13, format: 2 }, { cmd: 'GDN', val: 'NHR10-TEST' }, { cmd: 'GP', val: 20 },
-    { cmd: 'GQS', val: '6,255' }, { cmd: 'GQP', val: '30,2,0' }, { cmd: 'GTF', val: 1 }, { cmd: 'GF', val: 'US' },
+    { cmd: 'GQS', val: '6,255' }, { cmd: 'GQP', val: '30,2,0' }, { cmd: 'GTF', val: 1 }, { cmd: 'GF', status: 'ok', val: 'US', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 },
   ];
   for (let revision = 1; revision <= 2; revision++) {
     mocks.connection.status = 'disconnected'; await act(async () => root.render(<App />));

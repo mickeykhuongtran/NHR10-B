@@ -1,6 +1,7 @@
-import { RegionBandSelection } from '../types';
+import { RegionBandConfig, RegionBandSelection } from '../types';
 import { assertValidBleDeviceName } from './deviceName';
 import { assertProfileId, parseProfileFormat, parseProfileId } from './rfLinkProfile';
+import { describeRegion, parseRegionReading, prepareRegionApply } from './regionBand';
 
 export interface SettingValues {
   power: number;
@@ -10,7 +11,7 @@ export interface SettingValues {
   'q-session': { q: number; session: number };
   'query-params': { interval: number; dwell: number; append: number };
   'tag-focus': boolean;
-  'region-band': { selection: RegionBandSelection; startKHz: number; count: number; space125KHz: number; save: boolean };
+  'region-band': { selection: RegionBandSelection; save: boolean };
 }
 export type SettingId = keyof SettingValues;
 export type SettingsRequest = { id: SettingId; mode: 'read' }
@@ -29,7 +30,7 @@ export const SETTING_META: Record<SettingId, { title: string; get: string; set: 
   'region-band': { title: 'RFID region band', get: 'GF', set: 'SF', setReplies: ['SF'] },
 };
 export const isSettingsError = (data: any) => ['err', 'error', 'failed'].includes(String(data.status ?? '').toLowerCase()) || data.ok === false;
-export const isSettingsBusy = (data: any) => [data.status, data.error, data.state, data.code].some(value => String(value).toLowerCase() === 'busy');
+export const isSettingsBusy = (data: any) => [data.status, data.error, data.msg, data.state, data.code].some(value => String(value).toLowerCase() === 'busy');
 const number = (value: unknown): number | null => {
   if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) return null;
   const parsed = Number(value);
@@ -72,12 +73,8 @@ export function parseSettingReading(id: SettingId, data: any): SettingReading | 
       return interval === null || dwell === null || append === null ? null : { interval, dwell, append };
     }
     case 'region-band': {
-      const val = String(data.val ?? '').toUpperCase();
-      const startKHz = integer(data.start_khz ?? data.start, 840000, 960000), count = integer(data.count, 1, 255), space125KHz = integer(data.space_125khz ?? data.space, 1, 255);
-      if (String(data.mode).toLowerCase() === 'custom' || val === 'CUSTOM') {
-        return startKHz === null || count === null || space125KHz === null ? null : { val, startKHz, count, space125KHz };
-      }
-      return ['US', 'ETSI', 'VN', 'JP', 'KOR'].includes(val) ? { val } : null;
+      const reading = parseRegionReading(data);
+      return reading ? { ...reading } : null;
     }
   }
 }
@@ -90,7 +87,7 @@ export function describeSetting(id: SettingId, reading: SettingReading): string 
     case 'tag-focus': return reading.val === 1 ? 'On' : 'Off';
     case 'q-session': return `Q ${reading.q}, session ${reading.session === 255 ? 'Auto' : `S${reading.session}`}`;
     case 'query-params': return `interval ${reading.interval} ms, dwell ${reading.dwell}, append ${reading.append}`;
-    case 'region-band': return reading.startKHz !== undefined ? `${reading.startKHz} kHz, ${reading.count} channels, spacing ${Number(reading.space125KHz) * 125} kHz` : String(reading.val);
+    case 'region-band': return describeRegion(reading as unknown as RegionBandConfig);
     default: return String(reading.val);
   }
 }
@@ -111,10 +108,7 @@ export function prepareSettingApply(request: Extract<SettingsRequest, { mode: 'a
     case 'q-session': return { command: { cmd, val: `${request.value.q},${request.value.session}` }, expected: request.value };
     case 'query-params': return { command: { cmd, val: `${request.value.interval},${request.value.dwell},${request.value.append}` }, expected: request.value };
     case 'region-band': {
-      const { selection, startKHz, count, space125KHz, save } = request.value;
-      return selection === 'Custom'
-        ? { command: { cmd, mode: 'custom', start_khz: startKHz, count, space_125khz: space125KHz, save }, expected: { startKHz, count, space125KHz } }
-        : { command: { cmd, val: selection, save }, expected: { val: selection } };
+      return prepareRegionApply(request.value.selection, request.value.save);
     }
   }
 }

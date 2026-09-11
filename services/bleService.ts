@@ -1,6 +1,7 @@
 import { ConnectionStatus } from '../types';
 import { assertValidBleDeviceName } from '../utils/deviceName';
 import { assertProfileId } from '../utils/rfLinkProfile';
+import { prepareRegionApply } from '../utils/regionBand';
 
 // --- Web Bluetooth Type Definitions ---
 interface BluetoothDevice extends EventTarget {
@@ -1133,19 +1134,8 @@ class BLEService {
     return this.sendCommand({ cmd: 'SQP', val: `${intervalMs},${dwellRaw},${append}` });
   }
 
-  async setRegion(region: string, save = true) {
-    return this.sendCommand({ cmd: 'SF', val: region, save });
-  }
-
-  async setCustomRegion(startKHz: number, count: number, space125KHz: number, save = true) {
-    return this.sendCommand({
-      cmd: 'SF',
-      mode: 'custom',
-      start_khz: startKHz,
-      count,
-      space_125khz: space125KHz,
-      save,
-    });
+  async setRegion(region: string, save: boolean) {
+    return this.sendCommand(prepareRegionApply(region, save).command);
   }
 
   async setTagFocus(enable: boolean) { return this.sendCommand({ cmd: 'TF', val: enable ? 1 : 0 }); }

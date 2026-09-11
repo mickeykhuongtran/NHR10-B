@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { bleService } from '../services/bleService';
-import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision } from '../types';
+import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision, RegionStatusUpdate } from '../types';
 import { BATTERY_POLL_INTERVAL_MS, isBatteryShutdown, isBatterySnapshotStale, parseBatterySnapshot } from '../utils/battery';
 import { formatDeviceDisplayName } from '../utils/deviceIdentity';
 import { validateBleDeviceName } from '../utils/deviceName';
@@ -19,38 +19,6 @@ const parseFiniteNumber = (value: unknown): number | null => {
     return Number.isFinite(parsed) ? parsed : null;
   }
   return null;
-};
-
-const parseRegionBand = (data: any): Settings['regionBand'] | null => {
-  if (data.status === 'err') return null;
-
-  const modeValue = String(data.mode ?? '').toLowerCase();
-  const mode = modeValue === 'template' || modeValue === 'custom' ? modeValue : 'unknown';
-  const val = typeof data.val === 'string' && data.val.trim() ? data.val.trim().toUpperCase() : mode === 'custom' ? 'CUSTOM' : '';
-  const startKHz = parseFiniteNumber(data.start_khz ?? data.start);
-  const count = parseFiniteNumber(data.count);
-  const space125KHz = parseFiniteNumber(data.space_125khz ?? data.space);
-  const stepKHz = parseFiniteNumber(data.step_khz) ?? (space125KHz !== null ? space125KHz * 125 : null);
-  const freband = parseFiniteNumber(data.freband);
-  const min = parseFiniteNumber(data.min);
-  const max = parseFiniteNumber(data.max);
-
-  if (!val && mode === 'unknown' && startKHz === null && count === null) {
-    return null;
-  }
-
-  return {
-    val,
-    mode,
-    ...(freband !== null ? { freband } : {}),
-    ...(min !== null ? { min } : {}),
-    ...(max !== null ? { max } : {}),
-    ...(startKHz !== null ? { startKHz } : {}),
-    ...(count !== null ? { count } : {}),
-    ...(space125KHz !== null ? { space125KHz } : {}),
-    ...(stepKHz !== null ? { stepKHz } : {}),
-    ...(typeof data.save === 'boolean' ? { save: data.save } : {}),
-  };
 };
 
 type InventoryMode = 'idle' | 'interactive' | 'batch' | 'batchSaving' | 'locate';
@@ -101,6 +69,9 @@ export const useRFIDConnection = () => {
     deviceInfo: '',
     deviceName: '',
     deviceCanonicalId: '',
+    regionBandConfirmed: false,
+    regionBandSupport: 'unknown',
+    regionBandError: null,
     syncRevision: createSettingsSyncRevision(),
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -117,6 +88,15 @@ export const useRFIDConnection = () => {
     setSettings(s => ({ ...s, linkProfileConfirmed: false }));
   }, []);
 
+  const updateRegionStatus = useCallback((update: RegionStatusUpdate) => {
+    setSettings(s => ({ ...s,
+      regionBandConfirmed: update.confirmed,
+      ...(update.support !== undefined ? { regionBandSupport: update.support } : {}),
+      ...(update.error !== undefined ? { regionBandError: update.error } : {}),
+      ...(update.reading ? { regionBand: update.reading, syncRevision: bumpSettingsSyncRevision(s, 'regionBand') } : {}),
+    }));
+  }, []);
+
   const clearDeviceTelemetry = useCallback(() => {
     setSettings(s => ({
       ...s,
@@ -127,6 +107,9 @@ export const useRFIDConnection = () => {
       deviceCanonicalId: '',
       linkProfileFormat: null,
       linkProfileConfirmed: false,
+      regionBandConfirmed: false,
+      regionBandSupport: 'unknown',
+      regionBandError: null,
     }));
   }, []);
 
@@ -316,12 +299,8 @@ export const useRFIDConnection = () => {
         const reading = parseSettingReading('tag-focus', data);
         if (reading) setSettings(prev => ({ ...prev, tagFocus: reading.val === 1, syncRevision: bumpSettingsSyncRevision(prev, 'tagFocus') }));
     }
-    if (data.cmd === 'GF' || data.cmd === 'SF') {
-        const regionBand = parseRegionBand(data);
-        if (regionBand) {
-            setSettings(prev => ({ ...prev, regionBand, syncRevision: bumpSettingsSyncRevision(prev, 'regionBand') }));
-        }
-    }
+    // Region readings are committed by the settings coordinator only after a
+    // matching fresh GF. Late SF/GF packets must not confirm a timed-out request.
   }, [addLog, invalidateProfile, markBatteryHeartbeat, markDeviceActivity]);
 
   const handleConnectionStatusChange = useCallback((nextStatus: ConnectionStatus, reason?: string) => {
@@ -505,6 +484,7 @@ export const useRFIDConnection = () => {
     addLog,
     clearLogs,
     invalidateProfile,
+    updateRegionStatus,
     connect,
     disconnect,
     handleConnectionStatusChange,

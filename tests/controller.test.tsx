@@ -4,6 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { DashboardLayout } from '../components/dashboard/DashboardLayout';
 import { OperationsTab } from '../components/dashboard/OperationsTab';
 import { ScannedTagPicker } from '../components/dashboard/ScannedTagPicker';
+import { parseRegionReading } from '../utils/regionBand';
+import { REGION_REPLIES, SUBSET_REPLY, UNKNOWN_REPLY } from './region-fixtures';
 
 vi.mock('react-virtualized-auto-sizer', () => ({ default: ({ children }: any) => children({ height: 300, width: 900 }) }));
 vi.mock('../services/bleService', () => ({ bleService: { getSettings: vi.fn() } }));
@@ -281,4 +283,58 @@ it('keeps an unknown format explicit and marks cached profile unconfirmed on rec
   props.settings = { ...props.settings, linkProfileConfirmed: true, linkProfileFormat: 2 };
   render(<DashboardLayout {...props} />);
   expect(apply.disabled).toBe(false); expect(select.selectedOptions[0].textContent).toBe('STD — 640 kHz / Miller 4');
+});
+
+it('offers only US, ETSI and VN and keeps Region Apply/Save locked until a current GF succeeds', () => {
+  const props = fixture(); props.status = 'connected';
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const card = container.querySelector('[aria-label="RFID Region Band"]')!;
+  const select = card.querySelector<HTMLSelectElement>('#setting-region')!;
+  expect([...select.options].filter(option => option.value).map(option => [option.value, option.textContent])).toEqual([
+    ['US', 'US (902-928 MHz)'], ['ETSI', 'ETSI (865-868 MHz)'], ['VN', 'VN (918-923 MHz)'],
+  ]);
+  expect(select.value).toBe('');
+  expect(card.querySelectorAll('input[type="number"]')).toHaveLength(0);
+  const apply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Apply')!;
+  const save = card.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  expect(apply.disabled).toBe(true); expect(save.disabled).toBe(true);
+  props.settings = { ...props.settings, regionBand: parseRegionReading(REGION_REPLIES.ETSI)!, regionBandConfirmed: true, regionBandSupport: 'supported' };
+  render(<DashboardLayout {...props} />);
+  expect(apply.disabled).toBe(false); expect(save.disabled).toBe(false);
+  expect(card.textContent).toContain('865.7, 866.3, 866.9, 867.5 MHz'); expect(card.textContent).toContain('step 600 kHz');
+  act(() => { select.value = 'VN'; select.dispatchEvent(new Event('change', { bubbles: true })); save.click(); });
+  act(() => apply.click());
+  expect(props.onSettingsAction).toHaveBeenLastCalledWith({ id: 'region-band', mode: 'apply', value: { selection: 'VN', save: false } });
+  expect(card.querySelector('[aria-label="Current region"]')?.textContent).toContain('ETSI');
+  expect(card.textContent).toContain('918.75–922.25 MHz');
+});
+it.each([SUBSET_REPLY, UNKNOWN_REPLY])('preserves read-only actual Region without selecting US or sending a write: %j', packet => {
+  const props = fixture(); props.status = 'connected';
+  props.settings = { ...props.settings, regionBand: parseRegionReading(packet)!, regionBandConfirmed: true, regionBandSupport: 'supported' };
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const card = container.querySelector('[aria-label="RFID Region Band"]')!;
+  const select = card.querySelector<HTMLSelectElement>('#setting-region')!;
+  expect(select.value).toBe(''); expect(card.textContent).toContain('read-only');
+  expect(card.textContent).toContain(`band ${packet.band}`);
+  expect(props.onSettingsAction).not.toHaveBeenCalled();
+  const actual = card.querySelector('[aria-label="Current region"]')!.textContent;
+  if (packet.band === 4) expect(actual).not.toContain('MHz');
+  act(() => { select.value = 'ETSI'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+  expect(card.querySelector('[aria-label="Current region"]')!.textContent).toBe(actual);
+  const apply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Apply')!;
+  expect(apply.disabled).toBe(false);
+});
+it('shows unsupported or stale Region state without enabling Apply, and locks all Region controls during scan', () => {
+  const props = fixture(); props.status = 'connected';
+  props.settings = { ...props.settings, regionBand: parseRegionReading(REGION_REPLIES.VN)!, regionBandConfirmed: false, regionBandSupport: 'unavailable', regionBandError: 'GF: timeout' };
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const card = container.querySelector('[aria-label="RFID Region Band"]')!;
+  expect(card.textContent).toContain('Unconfirmed'); expect(card.textContent).toContain('Firmware chưa hỗ trợ cấu hình Region');
+  expect(card.textContent).toContain('GF: timeout');
+  const read = [...card.querySelectorAll('button')].find(button => button.textContent === 'Read')!;
+  const apply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Apply')!;
+  expect(read.disabled).toBe(false); expect(apply.disabled).toBe(true);
+  props.settings = { ...props.settings, regionBandConfirmed: true, regionBandSupport: 'supported' }; props.isScanning = true;
+  render(<DashboardLayout {...props} />);
+  expect(read.disabled).toBe(true); expect(apply.disabled).toBe(true);
 });

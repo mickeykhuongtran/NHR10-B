@@ -41,7 +41,7 @@ const App: React.FC = () => {
   const [batchSaveInfo, setBatchSaveInfo] = useState<BatchSaveInfo>(DEFAULT_BATCH_SAVE_INFO);
   const batchSavingTimerRef = useRef<number | null>(null);
   const isBatchSaving = batchSaveInfo.state === 'saving';
-  const settingsActions = useSettingsActions(connection.addLog, connection.status, undefined, connection.invalidateProfile);
+  const settingsActions = useSettingsActions(connection.addLog, connection.status, undefined, connection.invalidateProfile, connection.updateRegionStatus);
 
   const runOperation = async (action: () => Promise<void>) => {
     if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() || connection.status !== 'connected') return;
@@ -175,17 +175,8 @@ const handleDataReceived = useCallback((data: any) => {
       }
     }
 
-    if (data.cmd === 'SF' && !handledSettingsReply) {
-      if (data.status === 'ok') {
-        connection.addLog(`Region Band set: ${data.val ?? data.mode ?? 'updated'}`, 'info');
-        void bleService.getRegion().catch((error) => connection.addLog(`Region sync failed: ${error.message}`, 'error'));
-      } else if (data.status === 'err') {
-        connection.addLog(`Region Band set failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
-      }
-    }
-
-    if (data.cmd === 'GF' && data.status === 'err' && !handledSettingsReply) {
-      connection.addLog(`Region Band read failed: ${data.msg ?? data.code ?? 'unknown_error'}`, 'error');
+    if (['GF', 'SF'].includes(data.cmd) && data.status === 'err' && !handledSettingsReply) {
+      connection.addLog(`Region response: ${data.error ?? data.msg ?? data.code ?? 'unknown_error'}`, 'error');
     }
 
     if (data.cmd === 'SDN' && !handledSettingsReply) {

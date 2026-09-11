@@ -1,11 +1,13 @@
 /// <reference types="vite/client" />
 /** Development-only UI fixture. Not an entry point in the production build. No hardware connection. */
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import { parseBatterySnapshot } from '../utils/battery';
 import { DashboardLayout } from '../components/dashboard/DashboardLayout';
 import { LogEntry, Tag, WriteStatus, Settings } from '../types';
 import { useSettingsActions } from '../hooks/useSettingsActions';
+import { REGION_PRESETS, isRegionPreset } from '../utils/regionBand';
+import { RegionStatusUpdate } from '../types';
 import { DeviceCommand, SETTING_META, parseSettingReading, SettingId } from '../utils/settingsProtocol';
 
 const sampleTags: Tag[] = Array.from({ length: 240 }, (_, i) => ({ epc: `E200001122334455${i.toString(16).toUpperCase().padStart(8, '0')}`, count: i + 5, rssi: -60 - i % 25, timestamp: Date.now() }));
@@ -36,10 +38,10 @@ function Preview() {
   const writeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (writeTimer.current) clearTimeout(writeTimer.current); }, []);
   const [history, setHistory] = useState<{ INDEX: number; EPC: string }[]>([]);
-  const [settings, setSettings] = useState<Settings>({ power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 15, linkProfileFormat: 2, linkProfileConfirmed: true, qValue: 4, session: 1, scanParams: { interval: 30, dwell: 2, count: 0 }, version: 'UI-TEST', temperature: 32, batterySnapshot: parseBatterySnapshot({ cmd: 'GB', ver: 2, voltage: 7900, state: 'NORMAL', load: 'idle', percent: 73.4, valid: true, charging: false, full: false, health: 0, age_ms: 200 }), deviceInfo: 'NHR10-TEST', deviceName: 'NHR10-TEST', deviceCanonicalId: 'UI-FIXTURE-ONLY', regionBand: { val: 'US', mode: 'template' } });
+  const [settings, setSettings] = useState<Settings>({ power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 15, linkProfileFormat: 2, linkProfileConfirmed: true, qValue: 4, session: 1, scanParams: { interval: 30, dwell: 2, count: 0 }, version: 'UI-TEST', temperature: 32, batterySnapshot: parseBatterySnapshot({ cmd: 'GB', ver: 2, voltage: 7900, state: 'NORMAL', load: 'idle', percent: 73.4, valid: true, charging: false, full: false, health: 0, age_ms: 200 }), deviceInfo: 'NHR10-TEST', deviceName: 'NHR10-TEST', deviceCanonicalId: 'UI-FIXTURE-ONLY', regionBandConfirmed: false, regionBandSupport: 'unknown' });
   const [settingsError, setSettingsError] = useState(false);
   const [settingsTimeout, setSettingsTimeout] = useState(false);
-  const simulatedReadings = useRef<Record<string, any>>({ GP: { val: 20 }, GLP: { val: 15, format: 2 }, GQS: { q: 4, session: 1 }, GQP: { interval: 30, dwell: 2, times: 0 }, GTF: { val: 1 }, GDN: { val: 'NHR10-TEST' }, GF: { val: 'US', mode: 'template' } });
+  const simulatedReadings = useRef<Record<string, any>>({ GP: { val: 20 }, GLP: { val: 15, format: 2 }, GQS: { q: 4, session: 1 }, GQP: { interval: 30, dwell: 2, times: 0 }, GTF: { val: 1 }, GDN: { val: 'NHR10-TEST' }, GF: { status: 'ok', val: 'US', mode: 'template', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 } });
   const settingsTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   useEffect(() => () => settingsTimers.current.forEach(clearTimeout), []);
   const log = (message: string, type: LogEntry['type'] = 'info', notice?: LogEntry['notice']) => setLogs(current => [...current, { message, type, timestamp: Date.now(), notice }].slice(-1000));
@@ -55,6 +57,11 @@ function Preview() {
         if (command.cmd === meta.set) {
           const parts = String(command.val).split(',').map(Number);
           simulatedReadings.current[meta.get] = id === 'q-session' ? { q: parts[0], session: parts[1] } : id === 'query-params' ? { interval: parts[0], dwell: parts[1], times: parts[2] } : id === 'region-band' ? { ...command, mode: command.mode ?? 'template' } : { val: command.val };
+          if (id === 'region-band' && isRegionPreset(command.val)) {
+            const plan = REGION_PRESETS[command.val];
+            simulatedReadings.current.GF = { status: 'ok', val: command.val, mode: 'template', band: plan.band, min_ch: plan.minCh, max_ch: plan.maxCh, start_khz: plan.startKHz, end_khz: plan.endKHz, count: plan.count, step_khz: plan.stepKHz };
+            response = { cmd: 'SF', status: 'ok', val: command.val, band: plan.band, min_ch: plan.minCh, max_ch: plan.maxCh, saved: command.save, verified: true };
+          }
           if (id === 'profile') {
             simulatedReadings.current.GLP.format = 2;
             response = { cmd: 'SLP', status: 'ok', persisted: true, ...simulatedReadings.current.GLP };
@@ -65,13 +72,23 @@ function Preview() {
       if (id) {
         const reading = parseSettingReading(id, response);
         if (reading) setSettings(current => ({ ...current,
-          ...(id === 'power' ? { power: Number(reading.val) } : id === 'profile' ? { linkProfile: Number(reading.val), linkProfileFormat: response.format ?? null, linkProfileConfirmed: true } : id === 'tag-focus' ? { tagFocus: reading.val === 1 } : id === 'q-session' ? { qValue: Number(reading.q), session: Number(reading.session) } : id === 'query-params' ? { scanParams: { interval: Number(reading.interval), dwell: Number(reading.dwell), append: Number(reading.append), count: Number(reading.append) } } : id === 'device-name' ? { deviceName: String(reading.val) } : { regionBand: { val: String(reading.val ?? 'CUSTOM'), mode: response.mode, startKHz: Number(reading.startKHz), count: Number(reading.count), space125KHz: Number(reading.space125KHz) } }),
+          ...(id === 'power' ? { power: Number(reading.val) } : id === 'profile' ? { linkProfile: Number(reading.val), linkProfileFormat: response.format ?? null, linkProfileConfirmed: true } : id === 'tag-focus' ? { tagFocus: reading.val === 1 } : id === 'q-session' ? { qValue: Number(reading.q), session: Number(reading.session) } : id === 'query-params' ? { scanParams: { interval: Number(reading.interval), dwell: Number(reading.dwell), append: Number(reading.append), count: Number(reading.append) } } : id === 'device-name' ? { deviceName: String(reading.val) } : {}),
         }));
       }
       log(`RX: ${JSON.stringify(response)}`, 'rx');
     }, 1100));
   };
-  const settingActions = useSettingsActions(log, connected ? 'connected' : 'disconnected', sendSimulatedSetting);
+  const updateRegionStatus = useCallback((update: RegionStatusUpdate) => setSettings(current => ({ ...current,
+    regionBandConfirmed: update.confirmed,
+    ...(update.support !== undefined ? { regionBandSupport: update.support } : {}),
+    ...(update.error !== undefined ? { regionBandError: update.error } : {}),
+    ...(update.reading ? { regionBand: update.reading } : {}),
+  })), []);
+  const settingActions = useSettingsActions(log, connected ? 'connected' : 'disconnected', sendSimulatedSetting, undefined, updateRegionStatus);
+  useEffect(() => {
+    updateRegionStatus({ confirmed: false, support: 'unknown', error: null });
+    if (connected) void settingActions.run({ id: 'region-band', mode: 'read' });
+  }, [connected]);
   const write = () => {
     setWriteStatus('pending');
     const id = `write-${++attempt.current}`;

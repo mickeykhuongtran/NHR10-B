@@ -7,6 +7,7 @@ import { SettingsRequest } from '../../utils/settingsProtocol';
 import { PageHeader } from './PageHeader';
 import { BLE_DEVICE_NAME_MAX_BYTES, validateBleDeviceName } from '../../utils/deviceName';
 import { parseProfileFormat, profileOptions } from '../../utils/rfLinkProfile';
+import { describeRegion, isRegionPreset, REGION_PRESETS, regionChannelCenters, formatRegionMHz } from '../../utils/regionBand';
 
 interface SettingsTabProps {
   isConnected: boolean;
@@ -21,14 +22,6 @@ const INTERVAL_OPTIONS = [0, 10, 20, 30, 40, 50, 60];
 const APPEND_OPTIONS = [0, 1, 2, 3, 4];
 const Q_OPTIONS = Array.from({ length: 16 }, (_, index) => index);
 const SESSION_OPTIONS = [0, 1, 2, 3, 255];
-const REGION_OPTIONS: Array<{ label: string; value: RegionBandSelection }> = [
-  { label: 'US', value: 'US' },
-  { label: 'ETSI', value: 'ETSI' },
-  { label: 'VN', value: 'VN' },
-  { label: 'JP', value: 'JP' },
-  { label: 'KOR', value: 'KOR' },
-  { label: 'Custom', value: 'Custom' },
-];
 const DWELL_SELECT_OPTIONS = DWELL_OPTIONS.map((item) => ({ label: String(item), value: item }));
 const INTERVAL_SELECT_OPTIONS = INTERVAL_OPTIONS.map((item) => ({ label: `${item} ms`, value: item }));
 const APPEND_SELECT_OPTIONS = APPEND_OPTIONS.map((item) => ({ label: String(item), value: item }));
@@ -36,33 +29,10 @@ const Q_SELECT_OPTIONS = Q_OPTIONS.map((item) => ({ label: String(item), value: 
 const SESSION_SELECT_OPTIONS = SESSION_OPTIONS.map((item) => ({ label: item === 255 ? 'Auto' : `S${item}`, value: item }));
 const FIELD_CLASS = 'h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 focus:border-blue-500';
 const COMPACT_BUTTON_CLASS = 'h-10 text-sm';
-const REGION_MIN_KHZ = 840000;
-const REGION_MAX_KHZ = 960000;
-const VN_REGION_DEFAULT = { startKHz: 918500, count: 9, space125KHz: 4 };
 const clampNumber = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-const normalizeRegionNumber = (value: unknown, fallback: number) => {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? Math.round(parsed) : fallback;
-};
-const isVnDefaultRegion = (regionBand?: SettingsType['regionBand']) => (
-  regionBand?.startKHz === VN_REGION_DEFAULT.startKHz &&
-  regionBand?.count === VN_REGION_DEFAULT.count &&
-  regionBand?.space125KHz === VN_REGION_DEFAULT.space125KHz
-);
-const normalizeRegionSelection = (regionBand?: SettingsType['regionBand']): RegionBandSelection => {
-  const val = String(regionBand?.val ?? '').toUpperCase();
+const currentRegionSelection = (settings: SettingsType): RegionBandSelection | '' =>
+  settings.regionBandConfirmed && settings.regionBand?.mode === 'template' && isRegionPreset(settings.regionBand.val) ? settings.regionBand.val : '';
 
-  if (regionBand?.mode === 'custom') {
-    return val === 'VN' && isVnDefaultRegion(regionBand) ? 'VN' : 'Custom';
-  }
-
-  return REGION_OPTIONS.some((option) => option.value === val) && val !== 'Custom'
-    ? val as RegionBandSelection
-    : 'US';
-};
-const formatFrequencyMHz = (khz: number | undefined) => (
-  typeof khz === 'number' && Number.isFinite(khz) ? `${(khz / 1000).toFixed(3)} MHz` : '--'
-);
 type SelectFieldId = 'profile' | 'q' | 'session' | 'interval' | 'dwell' | 'append';
 type SelectOption = { label: string; value: number };
 type SettingsAction = () => void | Promise<void>;
@@ -131,9 +101,10 @@ const SelectField = ({ id, onChange, options, value }: {
   {options.map(option => <option value={option.value} key={option.value}>{option.label}</option>)}
 </select>;
 const RegionSelectField = ({ value, onChange }: {
-  value: RegionBandSelection; onChange: (value: RegionBandSelection) => void;
-}) => <select id="setting-region" className={FIELD_CLASS} value={value} onChange={event => onChange(event.target.value as RegionBandSelection)}>
-  {REGION_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+  value: RegionBandSelection | ''; onChange: (value: RegionBandSelection) => void;
+}) => <select id="setting-region" className={FIELD_CLASS} value={value} onChange={event => { if (isRegionPreset(event.target.value)) onChange(event.target.value); }}>
+  <option value="" disabled>Choose a supported preset</option>
+  {(Object.keys(REGION_PRESETS) as RegionBandSelection[]).map(key => <option key={key} value={key}>{REGION_PRESETS[key].label}</option>)}
 </select>;
 
 export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy, settings, activity, onAction }: SettingsTabProps) {
@@ -148,11 +119,10 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const [dwell, setDwell] = useState(settings.scanParams?.dwell || 0);
   const [append, setAppend] = useState(settings.scanParams?.append || 0);
   const [tagFocus, setTagFocus] = useState(settings.tagFocus);
-  const [regionSelection, setRegionSelection] = useState<RegionBandSelection>(() => normalizeRegionSelection(settings.regionBand));
-  const [customStartKHz, setCustomStartKHz] = useState(() => normalizeRegionNumber(settings.regionBand?.startKHz, VN_REGION_DEFAULT.startKHz));
-  const [customCount, setCustomCount] = useState(() => normalizeRegionNumber(settings.regionBand?.count, VN_REGION_DEFAULT.count));
-  const [customSpace, setCustomSpace] = useState(() => normalizeRegionNumber(settings.regionBand?.space125KHz, VN_REGION_DEFAULT.space125KHz));
-  const [saveRegion, setSaveRegion] = useState(settings.regionBand?.save ?? true);
+  const [regionSelection, setRegionSelection] = useState<RegionBandSelection | ''>(() => currentRegionSelection(settings));
+  const [saveRegion, setSaveRegion] = useState(true);
+  const regionConfirmed = isConnected && settings.regionBandConfirmed === true;
+  const regionWritable = regionConfirmed && settings.regionBandSupport === 'supported';
   const activeActionKey = activity ? activity.id + ':' + activity.mode : null;
   const actionRowProps = { activity, locked: !isConnected || isBusy };
   const [confirmSave, setConfirmSave] = useState(false);
@@ -189,14 +159,8 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   }, [settings.tagFocus, tagFocusSyncRevision]);
 
   useEffect(() => {
-    setRegionSelection(normalizeRegionSelection(settings.regionBand));
-    setCustomStartKHz(normalizeRegionNumber(settings.regionBand?.startKHz, VN_REGION_DEFAULT.startKHz));
-    setCustomCount(normalizeRegionNumber(settings.regionBand?.count, VN_REGION_DEFAULT.count));
-    setCustomSpace(normalizeRegionNumber(settings.regionBand?.space125KHz, VN_REGION_DEFAULT.space125KHz));
-    if (typeof settings.regionBand?.save === 'boolean') {
-      setSaveRegion(settings.regionBand.save);
-    }
-  }, [regionBandSyncRevision, settings.regionBand]);
+    setRegionSelection(currentRegionSelection(settings));
+  }, [regionBandSyncRevision, settings.regionBand, isConnected]);
 
   useEffect(() => {
     if (!settings.scanParams) return;
@@ -224,35 +188,10 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const handleSetTagFocus = () => onAction({ id: 'tag-focus', mode: 'apply', value: tagFocus });
   const handleGetRegion = () => onAction({ id: 'region-band', mode: 'read' });
   const adjustPower = (delta: number) => setPower((current) => clampNumber(current + delta, 0, 30));
-  const customStepKHz = customSpace * 125;
-  const customEndKHz = customStartKHz + Math.max(0, customCount - 1) * customStepKHz;
-  const customRegionError = useMemo(() => {
-    if (customStartKHz < REGION_MIN_KHZ || customStartKHz > REGION_MAX_KHZ) {
-      return `Start must be ${REGION_MIN_KHZ}..${REGION_MAX_KHZ} kHz`;
-    }
-    if (customCount < 1 || customCount > 255) {
-      return 'Channel count must be 1..255';
-    }
-    if (customSpace < 1 || customSpace > 255) {
-      return 'Space must be 1..255';
-    }
-    if (customEndKHz > REGION_MAX_KHZ) {
-      return `End frequency ${customEndKHz} kHz exceeds ${REGION_MAX_KHZ} kHz`;
-    }
-    return '';
-  }, [customCount, customEndKHz, customSpace, customStartKHz]);
   const deviceNameValidation = useMemo(() => validateBleDeviceName(deviceName), [deviceName]);
-  const handleRegionChange = (value: RegionBandSelection) => {
-    setRegionSelection(value);
-    if (value === 'Custom') {
-      setCustomStartKHz(normalizeRegionNumber(settings.regionBand?.startKHz, VN_REGION_DEFAULT.startKHz));
-      setCustomCount(normalizeRegionNumber(settings.regionBand?.count, VN_REGION_DEFAULT.count));
-      setCustomSpace(normalizeRegionNumber(settings.regionBand?.space125KHz, VN_REGION_DEFAULT.space125KHz));
-    }
-  };
   const handleSetRegion = () => {
-    if (regionSelection === 'Custom' && customRegionError) return;
-    return onAction({ id: 'region-band', mode: 'apply', value: { selection: regionSelection, startKHz: customStartKHz, count: customCount, space125KHz: customSpace, save: saveRegion } });
+    if (!regionWritable || !isRegionPreset(regionSelection)) return;
+    return onAction({ id: 'region-band', mode: 'apply', value: { selection: regionSelection, save: saveRegion } });
   };
   const tagFocusIndicatorStyle: React.CSSProperties = {
     width: 'calc((100% - 0.5rem) / 2)',
@@ -414,7 +353,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
               <FieldLabel>Region</FieldLabel>
               <RegionSelectField
                 value={regionSelection}
-                onChange={handleRegionChange}
+                onChange={setRegionSelection}
               />
             </div>
             <div className="flex items-end">
@@ -422,6 +361,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
                 <input
                   type="checkbox"
                   checked={saveRegion}
+                  disabled={!regionWritable || activity !== null}
                   onChange={(event) => setSaveRegion(event.target.checked)}
                   className="h-4 w-4 accent-[#2563eb]"
                 />
@@ -430,55 +370,25 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
             </div>
           </div>
 
-          {regionSelection === 'Custom' && (
-            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_90px_minmax(0,1fr)]">
-              <div>
-                <FieldLabel>Start Freq, kHz</FieldLabel>
-                <input
-                  type="number"
-                  min={REGION_MIN_KHZ}
-                  max={REGION_MAX_KHZ}
-                  id="setting-start-freq-khz" value={customStartKHz}
-                  onChange={(event) => setCustomStartKHz(normalizeRegionNumber(event.target.value, 0))}
-                  className={`${FIELD_CLASS} text-right font-mono ${customRegionError && (customStartKHz < REGION_MIN_KHZ || customStartKHz > REGION_MAX_KHZ) ? 'border-[#FF3B30]/60' : ''}`}
-                />
-              </div>
-              <div>
-                <FieldLabel>Count</FieldLabel>
-                <input
-                  type="number"
-                  min={1}
-                  max={255}
-                  id="setting-count" value={customCount}
-                  onChange={(event) => setCustomCount(normalizeRegionNumber(event.target.value, 1))}
-                  className={`${FIELD_CLASS} text-right font-mono ${customRegionError && (customCount < 1 || customCount > 255) ? 'border-[#FF3B30]/60' : ''}`}
-                />
-              </div>
-              <div>
-                <FieldLabel>Space</FieldLabel>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={255}
-                    id="setting-space" value={customSpace}
-                    onChange={(event) => setCustomSpace(normalizeRegionNumber(event.target.value, 1))}
-                    className={`${FIELD_CLASS} text-right font-mono ${customRegionError && (customSpace < 1 || customSpace > 255) ? 'border-[#FF3B30]/60' : ''}`}
-                  />
-                  <span className="shrink-0 text-xs font-bold text-[#64748b]">x125 kHz</span>
-                </div>
-              </div>
-              <p className={`font-mono text-xs font-bold sm:col-span-3 ${customRegionError ? 'text-[#C32118]' : 'text-slate-800'}`}>
-                {customRegionError || `End ${customEndKHz} kHz (${formatFrequencyMHz(customEndKHz)}), step ${customStepKHz} kHz`}
-              </p>
-            </div>
-          )}
+          <div className="mt-3 space-y-2 text-xs leading-5 text-slate-600" aria-label="Current region">
+            <p role="status">{regionConfirmed ? 'Confirmed from device' : 'Unconfirmed — read Region from device'}</p>
+            <p>{settings.regionBand ? describeRegion(settings.regionBand) : 'No channel plan read from this device.'}</p>
+            {settings.regionBand && settings.regionBand.mode !== 'template' && <p>Current configuration is read-only. Choose US, ETSI or VN to replace it.</p>}
+            {settings.regionBand?.mode !== 'unknown' && settings.regionBand?.count !== undefined && <details>
+              <summary className="cursor-pointer">Actual channel centers</summary>
+              <p className="mt-1 break-words font-mono">{regionChannelCenters(settings.regionBand)}</p>
+            </details>}
+          </div>
+          {regionSelection && <p className="mt-3 text-xs leading-5 text-slate-500">Selected preset · {REGION_PRESETS[regionSelection].count} channels · centers {formatRegionMHz(REGION_PRESETS[regionSelection].startKHz)}–{formatRegionMHz(REGION_PRESETS[regionSelection].endKHz)} MHz · step {REGION_PRESETS[regionSelection].stepKHz} kHz</p>}
+          <p className="mt-2 text-xs text-slate-500">{saveRegion ? 'Save to the module for use after restart.' : 'Apply temporarily until the device restarts.'}</p>
+          {settings.regionBandSupport === 'unavailable' && <p role="status" className="mt-2 text-xs text-amber-700">Firmware chưa hỗ trợ cấu hình Region hoặc chưa phản hồi GF/SF. Nhấn Read để kiểm tra lại.</p>}
+          {settings.regionBandError && <p role="alert" className="mt-2 text-xs text-red-700">{settings.regionBandError}</p>}
 
           <ActionRow {...actionRowProps}
             id="region-band"
             onGet={handleGetRegion}
             onSet={handleSetRegion}
-            setDisabled={regionSelection === 'Custom' && Boolean(customRegionError)}
+            setDisabled={!regionWritable || !isRegionPreset(regionSelection)}
           />
         </SettingsCard>
 

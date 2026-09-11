@@ -38,21 +38,28 @@ export interface SettingsSyncRevision {
   regionBand: number;
 }
 
-export type RegionBandPreset = 'US' | 'ETSI' | 'VN' | 'JP' | 'KOR';
-export type RegionBandSelection = RegionBandPreset | 'Custom';
-export type RegionBandMode = 'template' | 'custom' | 'unknown';
+export type RegionBandPreset = 'US' | 'ETSI' | 'VN';
+export type RegionBandSelection = RegionBandPreset;
+export type RegionBandMode = 'template' | 'subset' | 'unknown';
+export type RegionSupport = 'unknown' | 'supported' | 'unavailable';
 
 export interface RegionBandConfig {
   val: string;
   mode: RegionBandMode;
-  freband?: number;
-  min?: number;
-  max?: number;
+  band: number;
+  minCh: number;
+  maxCh: number;
   startKHz?: number;
+  endKHz?: number;
   count?: number;
-  space125KHz?: number;
   stepKHz?: number;
-  save?: boolean;
+}
+
+export interface RegionStatusUpdate {
+  confirmed: boolean;
+  support?: RegionSupport;
+  error?: string | null;
+  reading?: RegionBandConfig;
 }
 
 export type BatteryProtectionState = 'normal' | 'warning' | 'critical' | 'shutdown' | 'unknown';
@@ -108,6 +115,9 @@ export interface Settings {
   /** Full identity verified from the firmware DI response; never used as the primary label. */
   deviceCanonicalId: string;
   regionBand?: RegionBandConfig;
+  regionBandConfirmed?: boolean;
+  regionBandSupport?: RegionSupport;
+  regionBandError?: string | null;
   syncRevision?: SettingsSyncRevision;
 }
 

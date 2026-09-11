@@ -1,12 +1,12 @@
 # Device settings: frontend fixes and firmware response contract
 
-RF Link Profile contract updated on 2026-09-11 from the device owner’s NHR-10 REVB specification. This update changes only the web controller. The non-profile firmware observations below are historical: the previous investigation inspected `D:/Firmware-Develop/NHR-10-REVC` (firmware 2.8); they have not been reverified against the new REVB firmware.
+RF Link Profile and Region contracts updated on 2026-09-11 from the device owner’s NHR-10 REVB specifications. See [Region integration](region-firmware-contract.md) for the implemented GF/SF behavior. This update changes only the web controller. The non-profile firmware observations below are historical: the previous investigation inspected `D:/Firmware-Develop/NHR-10-REVC` (firmware 2.8); they have not been reverified against the new REVB firmware.
 
 ## Fixed in the web controller
 
 - Read/Apply buttons now have stable React component identities. BLE telemetry no longer remounts them and drops keyboard focus. Pending feedback occupies reserved space; it does not insert a banner or dim the entire settings form.
 - A completed GATT write is only command delivery. Read waits for a valid reply. Apply waits for an acknowledgement, requests the corresponding GET, and compares the reported value with the submitted value. Each user operation emits one auto-dismiss notice and a retained diagnostic log.
-- SET acknowledgement timeout is 4 seconds; GET timeout is 5 seconds. SLP/SRP require the original SET command, `status: "ok"`, `persisted: true`, and a matching returned value before reporting “Đã lưu”. The web also reads GLP/GRP back and requires a match. A GLP/GRP response alone never proves persistence. Non-profile settings retain their existing read-back compatibility behavior.
+- RF Profile SET acknowledgement timeout is 4 seconds; GET timeout is 5 seconds. Region Apply has a separate 5-second budget including SF acknowledgement and the web’s GF verification. SLP/SRP require the original SET command, `status: "ok"`, `persisted: true`, and a matching returned value before reporting “Đã lưu”. The web also reads GLP/GRP back and requires a match. A GLP/GRP response alone never proves persistence. Non-profile settings retain their existing read-back compatibility behavior.
 - Connection initialization, Diagnostics refresh, Settings Apply and Scan presets use the same response-aware coordinator. Configuration requests are sequential through their replies, not merely through GATT writes. Busy responses wait for a previous configuration completion, or a full operation timeout when no completion event arrives, then retry at most twice. Disconnect/unmount cancels pending work. Scanning, tag writes and further settings commands cannot overlap a pending transaction.
 - A status-only TF/STF acknowledgement no longer gets parsed as OFF. Only a valid `val: 0` or `val: 1` changes the displayed Tag Focus state.
 
@@ -59,33 +59,11 @@ In the previously inspected firmware, the GET extended-parameter error response 
 
 In that historical inspection, Q/Session and Query Parameter setters saved to module flash, while TF applied a temporary setting and STF saved Tag Focus. The web does not infer RF profile persistence from these older observations; the current REVB contract above governs SLP/SRP.
 
-## Historical Region and Save configuration gaps
+## Region integration and configuration SAVE
 
-The inspected BLE command dispatcher does not handle `GF`, `SF`, or a configuration-save request `SAVE`. The `SAVE` JSON in `main/main.c` describes **batch inventory file progress**, not configuration persistence. Until firmware implements these operations, the web must report missing confirmation instead of success.
+The current REVB firmware implements GF/SF. The previous Region proposal is superseded by [the current Region contract](region-firmware-contract.md): only US/ETSI/VN, explicit band/channel verification, and `saved`/`verified` flags. JP, KOR, Custom writes and `space_125khz` are not part of this web API.
 
-Required minimum contract (examples describe proposed firmware additions, not existing support):
-
-```json
-{"cmd":"GF"}
-{"cmd":"GF","status":"ok","mode":"template","val":"US"}
-
-{"cmd":"SF","val":"US","save":true}
-{"cmd":"SF","status":"ok","mode":"template","val":"US","save":true}
-
-{"cmd":"SF","mode":"custom","start_khz":918500,"count":9,"space_125khz":4,"save":true}
-{"cmd":"SF","status":"ok","mode":"custom","val":"CUSTOM","start_khz":918500,"count":9,"space_125khz":4,"save":true}
-
-{"cmd":"SAVE"}
-{"cmd":"SAVE","status":"ok"}
-
-{"cmd":"SF","status":"err","code":"invalid_region","msg":"Unsupported frequency plan"}
-{"cmd":"SAVE","status":"err","code":"storage","msg":"Configuration was not saved"}
-```
-
-- GF must return the actual module configuration, including `start_khz`, `count`, `space_125khz` for custom plans. Template names expected by the web are US, ETSI, VN, JP and KOR; define their mappings explicitly in firmware.
-- SF must validate the complete frequency plan, apply it to the module and report hardware errors. When `save: true`, success must also require successful persistence; report a persistence error separately if applying succeeded but saving failed.
-- Define exactly which settings SAVE persists. Send its successful acknowledgement only after those writes finish. Do not reuse `mode: batch` progress messages as configuration success.
-- Unsupported commands and invalid arguments should return `status: err` with the original `cmd` and an error code, instead of only logging internally and leaving the app to time out.
+The older dispatcher inspection did not implement a global configuration `SAVE`; its `SAVE` notifications described batch inventory progress. The new Region note does not establish support for a global configuration save. The web continues to require a separate non-batch `SAVE`, `status: "ok"` reply for that existing button. Region saving uses `SF` with the JSON boolean `save`, not the global SAVE command or ESP32 NVS.
 
 ## Recommended protocol improvements
 
