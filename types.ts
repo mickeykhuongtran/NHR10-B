@@ -85,7 +85,11 @@ export interface Settings {
   buzzer: boolean;
   tagFocus: boolean;
   fastTid: boolean;
-  linkProfile: number;
+  linkProfile: number | null;
+  linkProfileFormat?: 1 | 2 | null;
+  /** True only after a valid response in the current connection. Not proof of persistence. */
+  linkProfileConfirmed?: boolean;
+  target?: number;
   qValue: number;
   session: number;
   scanParams: {

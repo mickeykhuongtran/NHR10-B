@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { bleService } from './services/bleService';
 import { DashboardLayout } from './components/dashboard/DashboardLayout';
-import { BatchSaveInfo, Settings, WriteStatus } from './types';
+import { BatchSaveInfo, WriteStatus } from './types';
 import { useRFIDConnection } from './hooks/useRFIDConnection';
 import { useScanLogic } from './hooks/useScanLogic';
 import { useLocateLogic } from './hooks/useLocateLogic';
 import { useFileTransfer } from './hooks/useFileTransfer';
 import { useSettingsActions } from './hooks/useSettingsActions';
 import { SettingsRequest } from './utils/settingsProtocol';
+import { parseProfileFormat, presetProfileId } from './utils/rfLinkProfile';
 
 const DEFAULT_BATCH_SAVE_INFO: BatchSaveInfo = {
   state: 'idle',
@@ -40,7 +41,7 @@ const App: React.FC = () => {
   const [batchSaveInfo, setBatchSaveInfo] = useState<BatchSaveInfo>(DEFAULT_BATCH_SAVE_INFO);
   const batchSavingTimerRef = useRef<number | null>(null);
   const isBatchSaving = batchSaveInfo.state === 'saving';
-  const settingsActions = useSettingsActions(connection.addLog, connection.status);
+  const settingsActions = useSettingsActions(connection.addLog, connection.status, undefined, connection.invalidateProfile);
 
   const runOperation = async (action: () => Promise<void>) => {
     if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() || connection.status !== 'connected') return;
@@ -248,89 +249,53 @@ const handleDataReceived = useCallback((data: any) => {
     connection.setInventoryActive(connection.status === 'connected' && connectionMode !== 'idle', connectionMode);
   }, [connection.setInventoryActive, connection.status, isBatchSaving, locate.isLocating, scan.activeScanType]);
 
+  const synchronizedRevision = useRef(0);
+  const refreshSettings = useCallback(async () => {
+    await settingsActions.runSequence([
+      { id: 'profile', mode: 'read' },
+      { id: 'device-name', mode: 'read' },
+      { id: 'power', mode: 'read' },
+      { id: 'q-session', mode: 'read' },
+      { id: 'query-params', mode: 'read' },
+      { id: 'tag-focus', mode: 'read' },
+      { id: 'region-band', mode: 'read' },
+    ], { silent: true, continueOnReadError: true });
+  }, [settingsActions.runSequence]);
+  useEffect(() => {
+    if (connection.status !== 'connected' || !connection.connectionRevision || synchronizedRevision.current === connection.connectionRevision || settingsActions.isPending()) return;
+    synchronizedRevision.current = connection.connectionRevision;
+    void refreshSettings();
+  }, [connection.status, connection.connectionRevision, refreshSettings, settingsActions.activity, settingsActions.isPending]);
+
+  const handleRefreshSettings = async () => {
+    await runOperation(async () => {
+      await refreshSettings();
+      await bleService.getDeviceInfo();
+      await bleService.getInfo();
+      await bleService.getBattery();
+      await bleService.getTemperature();
+    });
+  };
+
   // --- Handlers ---
-
-  const handleUpdateSettings = async (key: keyof Settings, value: any) => {
-    try {
-      if (key === 'power') {
-        await bleService.setPower(value);
-        connection.setSettings(s => ({ ...s, power: value }));
-      } else if (key === 'buzzer') {
-        await bleService.sendCommand({ cmd: 'BZ', val: value ? 'on' : 'off' });
-        connection.setSettings(s => ({ ...s, buzzer: value }));
-      } else if (key === 'tagFocus') {
-        await bleService.setTagFocus(value);
-        connection.setSettings(s => ({ ...s, tagFocus: value }));
-      } else if (key === 'fastTid') {
-        await bleService.sendCommand({ cmd: 'TID', val: value ? 1 : 0 });
-        connection.setSettings(s => ({ ...s, fastTid: value }));
-      } else if (key === 'linkProfile') {
-        const profile = Number(value);
-        await bleService.setLinkProfile(profile);
-        connection.setSettings(s => ({ ...s, linkProfile: profile }));
-      } else if (key === 'qValue') {
-        const { q, s } = value;
-        await bleService.setBaseband(connection.settings.linkProfile, q, s);
-        connection.setSettings(prev => ({ ...prev, qValue: q, session: s }));
-      } else if (key === 'scanParams') {
-        const { interval, dwell, count, append } = value;
-        // V12.6: Send values directly, firmware handles conversion
-        // interval: ms value (firmware divides by 10)
-        // dwell: raw count value (firmware passes through)
-        // append: direct value
-        await bleService.setQueryParam(interval, dwell, append || 0);
-        connection.setSettings(s => ({ ...s, scanParams: value }));
-      }
-      connection.addLog(`Updated ${key}`, 'info');
-    } catch (e: any) {
-      connection.addLog(`Settings Update Failed: ${e.message}`, 'error');
-    }
-  };
-
-  const handleSaveSetting = async (key: string, value: any) => {
-    try {
-      if (key === 'tagFocus') {
-        await bleService.sendCommand({ cmd: 'STF', val: value ? 1 : 0 });
-        connection.addLog(`Saved Tag Focus: ${value}`, 'info');
-      } else if (key === 'fastTid') {
-        await bleService.sendCommand({ cmd: 'STID', val: value ? 1 : 0 });
-        connection.addLog(`Saved Fast TID: ${value}`, 'info');
-      }
-    } catch (e: any) {
-      connection.addLog(`Save Setting Failed: ${e.message}`, 'error');
-    }
-  };
 
   const handleSettingsAction = useCallback((request: SettingsRequest) => {
     if (commandPendingRef.current || pendingWriteRef.current !== null || scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
-    return settingsActions.run(request);
+    return settingsActions.run(request).then(() => undefined);
   }, [scan.isScanning, locate.isLocating, isBatchSaving, fileTransfer.isFileTransferring, settingsActions.run]);
 
   const handleApplyPreset = async (mode: 'standard' | 'quick' | 'deep') => {
-    try {
-      if (mode === 'standard') {
-        // Profile 53, Q=4, Session=1, TagFocus=Enable
-        await bleService.setBaseband(53, 4, 1);
-        await bleService.setTagFocus(true);
-        connection.addLog('Applied Standard Mode', 'info');
-      } else if (mode === 'quick') {
-        // Profile 11, Q=2, Session=0, TagFocus=Disable
-        await bleService.setBaseband(11, 2, 0);
-        await bleService.setTagFocus(false);
-        connection.addLog('Applied Quick Scan Mode', 'info');
-      } else if (mode === 'deep') {
-        // Profile 13, Q=4, Session=1
-        await bleService.setBaseband(13, 4, 1);
-        await bleService.setTagFocus(true);
-        connection.addLog('Applied Deep Scan Mode', 'info');
-      }
-      await bleService.getProfile();
-      await bleService.getQSession();
-      await bleService.getTagFocus();
-    } catch (e: any) {
-      connection.addLog(`Failed to apply preset: ${e.message}`, 'error');
-      throw e;
-    }
+    if (scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) throw new Error('Stop the current operation before applying a preset.');
+    if (!connection.settings.linkProfileConfirmed) throw new Error('RF profile is unconfirmed. Read it from the device first.');
+    const profile = presetProfileId(mode, parseProfileFormat(connection.settings.linkProfileFormat));
+    let applied = false;
+    await runOperation(async () => {
+      applied = await settingsActions.runSequence([
+        { id: 'baseband', mode: 'apply', value: { profile, q: mode === 'quick' ? 2 : 4, session: mode === 'quick' ? 0 : 1, target: 0 } },
+        { id: 'tag-focus', mode: 'apply', value: mode !== 'quick' },
+      ]);
+    });
+    if (!applied) throw new Error('Preset was not fully confirmed. Read the current settings before retrying.');
   };
 
   const writeTag = async (action: () => Promise<void>) => {
@@ -437,8 +402,7 @@ const handleDataReceived = useCallback((data: any) => {
       writeStatus={writeStatus}
       writeMessage={writeMessage}
       
-      onUpdateSettings={handleUpdateSettings}
-      onSaveSetting={handleSaveSetting}
+      onRefreshSettings={handleRefreshSettings}
       onApplyPreset={handleApplyPreset}
       onShowPopup={handleShowPopup}
       

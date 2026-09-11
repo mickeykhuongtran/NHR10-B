@@ -57,13 +57,13 @@ it('does not call an acknowledged apply successful when the read-back differs', 
   await receive({ cmd: 'SP', status: 'ok' }); await receive({ cmd: 'GP', val: 20 });
   expect(log).toHaveBeenLastCalledWith(expect.stringContaining('Reader reports 20 dBm'), 'error', expect.objectContaining({ title: 'Apply not confirmed' }));
 });
-it('verifies legacy SLP via GLP even when the firmware emits no SET success acknowledgement', async () => {
+it('does not treat a GLP read-back as persistence confirmation after an SLP timeout', async () => {
   await start({ id: 'profile', mode: 'apply', value: 11 });
   await advance(SETTINGS_ACK_TIMEOUT_MS);
   expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SLP', 'GLP']);
-  expect(log).not.toHaveBeenCalled();
-  await receive({ cmd: 'GLP', val: 11 });
-  expect(log).toHaveBeenLastCalledWith('RF link profile: profile 11.', 'info', expect.objectContaining({ title: 'Applied and verified' }));
+  await receive({ cmd: 'GLP', val: 11, format: 2 });
+  expect(log).toHaveBeenLastCalledWith(expect.stringContaining('SLP'), 'error', expect.objectContaining({ title: 'Apply not confirmed' }));
+  expect(actions.activity).toBeNull();
 });
 it('handles GCFG errors while reading an extended setting', async () => {
   await start({ id: 'query-params', mode: 'read' });
@@ -101,4 +101,126 @@ it('allows one transaction at a time and gives repeated reads distinct notice id
 it('cancels a pending transaction and its timer on unmount', async () => {
   await start({ id: 'power', mode: 'read' }); await act(async () => root.render(null));
   expect(vi.getTimerCount()).toBe(0); expect(log).not.toHaveBeenCalled();
+});
+
+it.each([15, 11, 13, 53, 5185, 65535])('requires SLP saved ACK and matching read-back for ID %i', async val => {
+  await start({ id: 'profile', mode: 'apply', value: val });
+  expect(ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'SLP', val });
+  await receive({ cmd: 'GLP', val, format: 2 });
+  expect(ble.sendCommand).toHaveBeenCalledOnce(); expect(log).not.toHaveBeenCalled();
+  await advance(3999); expect(actions.activity?.phase).toBe('Applying');
+  await receive({ cmd: 'SLP', status: 'ok', val, format: 2, persisted: true });
+  expect(ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GLP' });
+  expect(log).not.toHaveBeenCalled();
+  await receive({ cmd: 'GLP', val, format: 2 });
+  expect(log).toHaveBeenLastCalledWith(`RF link profile: profile ${val}.`, 'info', expect.objectContaining({ title: 'Đã lưu' }));
+});
+it.each([
+  { cmd: 'SLP', status: 'ok', val: 13 },
+  { cmd: 'SLP', status: 'ok', val: 13, persisted: false },
+  { cmd: 'SLP', status: 'ok', val: 13, persisted: 'true' },
+  { cmd: 'SLP', status: 'ok', val: 15, persisted: true },
+  { cmd: 'SLP', status: 'ok', persisted: true },
+  { cmd: 'SLP', status: 'err', error: 'persist_failed' },
+])('never reports saved for incomplete/mismatched/failed SLP: %j', async ack => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await receive(ack);
+  expect(ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GLP' });
+  expect(actions.isPending()).toBe(true);
+  await start({ id: 'power', mode: 'apply', value: 20 });
+  expect(ble.sendCommand).toHaveBeenCalledTimes(2);
+  await receive({ cmd: 'GLP', val: 13, format: 2 });
+  expect(log.mock.calls.every(call => call[1] === 'error')).toBe(true);
+  if (ack.status === 'err') expect(log.mock.calls[0][0]).toContain('persist_failed');
+  expect(actions.isPending()).toBe(false);
+});
+it('requires another recovery read before writing when the previous recovery timed out', async () => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await receive({ cmd: 'SLP', status: 'err', error: 'persist_failed' });
+  await advance(SETTINGS_READ_TIMEOUT_MS);
+  await start({ id: 'power', mode: 'apply', value: 20 });
+  expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SLP', 'GLP', 'GLP']);
+  await receive({ cmd: 'GLP', val: 13, format: 2 });
+  expect(ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'SP', val: 20 });
+});
+it('waits for the previous configuration operation to finish before retrying busy', async () => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await receive({ cmd: 'SLP', status: 'err', error: 'busy' });
+  await start({ id: 'power', mode: 'apply', value: 20 });
+  await receive({ cmd: 'GB', status: 'ok', val: 90 });
+  await advance(2000);
+  expect(ble.sendCommand).toHaveBeenCalledOnce(); expect(actions.activity?.phase).toBe('Waiting');
+  await receive({ cmd: 'SQS', status: 'ok' });
+  expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SLP', 'SLP']);
+  expect(log).not.toHaveBeenCalled();
+  await receive({ cmd: 'SLP', status: 'ok', val: 13, persisted: true, format: 2 });
+  await receive({ cmd: 'GLP', val: 13, format: 2 });
+  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'info', expect.objectContaining({ title: 'Đã lưu' }));
+});
+it('bounds busy retries and waits a full operation window without a completion event', async () => {
+  await start({ id: 'profile', mode: 'read' });
+  for (let i = 0; i < 3; i++) {
+    expect(ble.sendCommand).toHaveBeenCalledTimes(i + 1);
+    await receive({ cmd: 'GLP', status: 'busy' });
+    await advance(SETTINGS_READ_TIMEOUT_MS - 1);
+    expect(ble.sendCommand).toHaveBeenCalledTimes(i + 1);
+    await advance(1);
+  }
+  expect(ble.sendCommand).toHaveBeenCalledTimes(3);
+  expect(actions.isPending()).toBe(false);
+  expect(log).toHaveBeenLastCalledWith(expect.stringContaining('busy'), 'error', expect.anything());
+});
+it('does not mistake the previous SLP completion for the new request after busy', async () => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await receive({ cmd: 'SLP', status: 'busy' });
+  await receive({ cmd: 'SLP', status: 'ok', val: 13, persisted: true });
+  expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SLP', 'SLP']);
+  expect(log).not.toHaveBeenCalled();
+});
+it('stops a preset sequence and reads GRP after a partial SRP failure', async () => {
+  await act(async () => { void actions.runSequence([
+    { id: 'baseband', mode: 'apply', value: { profile: 15, q: 4, session: 1, target: 0 } },
+    { id: 'tag-focus', mode: 'apply', value: true },
+  ]); });
+  await receive({ cmd: 'SRP', status: 'err', error: 'session_failed' });
+  expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SRP', 'GRP']);
+  await receive({ cmd: 'GRP', val: '15,4,255,0', format: 2 });
+  expect(ble.sendCommand).toHaveBeenCalledTimes(2); expect(actions.activity).toBeNull();
+  expect(log.mock.calls.some(call => call[2]?.title === 'Đã lưu')).toBe(false);
+});
+it('cancels busy retries on disconnect', async () => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await receive({ cmd: 'SLP', status: 'busy' });
+  await act(async () => root.render(<Harness status="disconnected" />));
+  await advance(15000);
+  expect(ble.sendCommand).toHaveBeenCalledOnce(); expect(actions.isPending()).toBe(false);
+});
+
+it('waits a full busy window even when the busy response arrives near the ACK deadline', async () => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await advance(SETTINGS_ACK_TIMEOUT_MS - 100);
+  await receive({ cmd: 'SLP', status: 'busy' });
+  await advance(SETTINGS_ACK_TIMEOUT_MS - 1);
+  expect(ble.sendCommand).toHaveBeenCalledOnce();
+  await advance(1);
+  expect(ble.sendCommand).toHaveBeenCalledTimes(2);
+});
+it('does not accept a value-only SLP as a saved acknowledgement', async () => {
+  await start({ id: 'profile', mode: 'apply', value: 13 });
+  await receive({ cmd: 'SLP', val: 13, format: 2, persisted: true });
+  expect(log).not.toHaveBeenCalled();
+  await advance(SETTINGS_ACK_TIMEOUT_MS);
+  await receive({ cmd: 'GLP', val: 13, format: 2 });
+  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'error', expect.objectContaining({ title: 'Apply not confirmed' }));
+});
+
+it('consumes a late legacy SDN ACK without scheduling a second GET or finishing verification', async () => {
+  await start({ id: 'device-name', mode: 'apply', value: 'NHR10-TEST' });
+  await advance(SETTINGS_ACK_TIMEOUT_MS);
+  expect(ble.sendCommand.mock.calls.map(call => call[0].cmd)).toEqual(['SDN', 'GDN']);
+  let handled = false;
+  await act(async () => { handled = actions.handleDataReceived({ cmd: 'SDN', status: 'ok', val: 'NHR10-TEST' }); });
+  expect(handled).toBe(true); expect(actions.activity?.phase).toBe('Verifying');
+  await receive({ cmd: 'GDN', val: 'NHR10-TEST' });
+  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'info', expect.objectContaining({ title: 'Applied and verified' }));
 });

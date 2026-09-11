@@ -4,7 +4,8 @@ import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision } from '../t
 import { BATTERY_POLL_INTERVAL_MS, isBatteryShutdown, isBatterySnapshotStale, parseBatterySnapshot } from '../utils/battery';
 import { formatDeviceDisplayName } from '../utils/deviceIdentity';
 import { validateBleDeviceName } from '../utils/deviceName';
-import { isSettingsError, parseSettingReading } from '../utils/settingsProtocol';
+import { isSettingsBusy, isSettingsError, parseSettingReading } from '../utils/settingsProtocol';
+import { parseProfileFormat } from '../utils/rfLinkProfile';
 
 const BATCH_ACTIVITY_TIMEOUT_MS = 30000;
 const SCAN_ACTIVITY_TIMEOUT_MS = 15000;
@@ -19,10 +20,6 @@ const parseFiniteNumber = (value: unknown): number | null => {
   }
   return null;
 };
-
-const parseLinkProfile = (data: any): number | null => (
-  parseFiniteNumber(data.val ?? data.profile ?? data.linkProfile ?? data.link_profile)
-);
 
 const parseRegionBand = (data: any): Settings['regionBand'] | null => {
   if (data.status === 'err') return null;
@@ -79,6 +76,7 @@ const bumpSettingsSyncRevision = (settings: Settings, key: SettingsSyncKey): Set
 
 export const useRFIDConnection = () => {
   const [status, setStatus] = useState<ConnectionStatus>('disconnected');
+  const [connectionRevision, setConnectionRevision] = useState(0);
   const [inventoryActive, setInventoryActiveState] = useState(false);
   const [inventoryMode, setInventoryModeState] = useState<InventoryMode>('idle');
   const lastDeviceActivityRef = useRef<number | null>(null);
@@ -91,7 +89,9 @@ export const useRFIDConnection = () => {
     buzzer: true,
     tagFocus: false,
     fastTid: false,
-    linkProfile: 53,
+    linkProfile: null,
+    linkProfileFormat: null,
+    linkProfileConfirmed: false,
     qValue: 4,
     session: 1,
     scanParams: { interval: 0, dwell: 0, count: 0 },
@@ -113,6 +113,10 @@ export const useRFIDConnection = () => {
     setLogs([]);
   }, []);
 
+  const invalidateProfile = useCallback(() => {
+    setSettings(s => ({ ...s, linkProfileConfirmed: false }));
+  }, []);
+
   const clearDeviceTelemetry = useCallback(() => {
     setSettings(s => ({
       ...s,
@@ -121,6 +125,8 @@ export const useRFIDConnection = () => {
       deviceInfo: '',
       deviceName: '',
       deviceCanonicalId: '',
+      linkProfileFormat: null,
+      linkProfileConfirmed: false,
     }));
   }, []);
 
@@ -236,7 +242,10 @@ export const useRFIDConnection = () => {
             addLog('Ignored malformed GB battery response', 'error');
         }
     }
-    if (isSettingsError(data)) return;
+    if (isSettingsError(data) || isSettingsBusy(data)) {
+        if (['GLP', 'SLP', 'GRP', 'SRP'].includes(data.cmd)) invalidateProfile();
+        return;
+    }
     if (data.cmd === 'GP' || data.cmd === 'SP') {
         const power = parseFiniteNumber(data.val ?? data.power ?? data.pwr);
         if (power !== null) {
@@ -244,10 +253,18 @@ export const useRFIDConnection = () => {
         }
     }
     if (data.cmd === 'GLP' || data.cmd === 'SLP') {
-        const profile = parseLinkProfile(data);
-        if (profile !== null) {
-            setSettings(s => ({ ...s, linkProfile: profile, syncRevision: bumpSettingsSyncRevision(s, 'linkProfile') }));
+        const reading = parseSettingReading('profile', data);
+        if (reading !== null) {
+            setSettings(s => ({ ...s, linkProfile: Number(reading.val), linkProfileFormat: parseProfileFormat(reading.format), linkProfileConfirmed: true, syncRevision: bumpSettingsSyncRevision(s, 'linkProfile') }));
         }
+    }
+    if (data.cmd === 'GRP' || data.cmd === 'SRP') {
+        const reading = parseSettingReading('baseband', data);
+        if (reading) setSettings(s => ({ ...s,
+            linkProfile: Number(reading.profile), linkProfileFormat: parseProfileFormat(reading.format), linkProfileConfirmed: true,
+            qValue: Number(reading.q), session: Number(reading.session), target: Number(reading.target),
+            syncRevision: bumpSettingsSyncRevision({ ...s, syncRevision: bumpSettingsSyncRevision(s, 'linkProfile') }, 'qSession'),
+        }));
     }
     if (data.cmd === 'GQS' || data.cmd === 'SQS') {
         let q = data.q;
@@ -305,10 +322,11 @@ export const useRFIDConnection = () => {
             setSettings(prev => ({ ...prev, regionBand, syncRevision: bumpSettingsSyncRevision(prev, 'regionBand') }));
         }
     }
-  }, [addLog, markBatteryHeartbeat, markDeviceActivity]);
+  }, [addLog, invalidateProfile, markBatteryHeartbeat, markDeviceActivity]);
 
   const handleConnectionStatusChange = useCallback((nextStatus: ConnectionStatus, reason?: string) => {
     if (nextStatus === 'connecting') {
+      clearDeviceTelemetry();
       setStatus('connecting');
       return;
     }
@@ -316,11 +334,12 @@ export const useRFIDConnection = () => {
     if (nextStatus === 'connected') {
       const connectedAt = Date.now();
       lastDeviceActivityRef.current = connectedAt;
-      // getSettings() below already queues one GB request for the reconnect.
+      // App reads configuration through its response-aware settings coordinator.
       lastBatteryPollAtRef.current = performance.now();
       heartbeatTimeoutReportedRef.current = false;
       setStatus('connected');
-      void bleService.getSettings().catch((error: any) => {
+      setConnectionRevision(revision => revision + 1);
+      void bleService.getBattery().catch((error: any) => {
         addLog(`State sync after reconnect failed: ${error.message}`, 'error');
       });
       return;
@@ -367,20 +386,14 @@ export const useRFIDConnection = () => {
         }));
       }
       setStatus('connected');
+      setConnectionRevision(revision => revision + 1);
       addLog(`Connected to ${deviceLabel || 'NHR-10'}`, 'info');
       
       // Init Settings
       await bleService.getDeviceInfo();
-      await bleService.getConfiguredDeviceName();
       await bleService.getInfo();
       lastBatteryPollAtRef.current = performance.now();
       await bleService.getBattery();
-      await bleService.getPower();
-      await bleService.getProfile();
-      await bleService.getQSession();
-      await bleService.getQueryParam();
-      await bleService.getTagFocus();
-      await bleService.getRegion();
       await bleService.getTemperature();
 
     } catch (e: any) {
@@ -485,11 +498,13 @@ export const useRFIDConnection = () => {
 
   return {
     status,
+    connectionRevision,
     settings,
     setSettings,
     logs,
     addLog,
     clearLogs,
+    invalidateProfile,
     connect,
     disconnect,
     handleConnectionStatusChange,

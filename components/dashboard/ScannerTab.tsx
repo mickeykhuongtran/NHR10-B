@@ -7,7 +7,7 @@ import { PageHeader } from './PageHeader';
 import { BatchSaveInfo, ScanStats, Tag } from '../../types';
 
 const PRESETS = [
-  { mode: 'standard', label: 'Standard', purpose: 'Everyday inventory and general tag reading. Start here for routine scans.', detail: 'Profile 53, Q4, S1, Tag Focus on' },
+  { mode: 'standard', label: 'Standard', purpose: 'Everyday inventory and general tag reading. Start here for routine scans.', detail: '640 kHz / Miller 4, Q4, S1, Tag Focus on' },
   { mode: 'quick', label: 'Quick', purpose: 'Small groups of nearby tags, with an emphasis on quick, repeated reads.', detail: 'Profile 11, Q2, S0, Tag Focus off' },
   { mode: 'deep', label: 'Deep', purpose: 'Try an alternative RF link when tags are difficult to read or reads are intermittent.', detail: 'Profile 13, Q4, S1, Tag Focus on' },
 ] as const;
@@ -33,6 +33,8 @@ interface ScannerTabProps {
   onClear: () => void;
   tags: Tag[];
   stats: ScanStats;
+  profileFormat: 1 | 2 | null;
+  profileConfirmed: boolean;
   onApplyPreset: (mode: Preset) => void;
   isBatchSaving: boolean;
   batchSaveInfo: BatchSaveInfo;
@@ -87,6 +89,7 @@ export const ScannerTab: React.FC<ScannerTabProps> = (props) => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [props.isScanning]);
+  useEffect(() => { if (!props.isConnected || !props.profileConfirmed) setPreset(null); }, [props.isConnected, props.profileConfirmed, props.profileFormat]);
   useEffect(() => setTimeoutInput(String(props.staleRemoveMs)), [props.staleRemoveMs]);
   useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
   // Preserve the last observed tag when automatic stale removal removes it from live data.
@@ -218,10 +221,12 @@ export const ScannerTab: React.FC<ScannerTabProps> = (props) => {
             <legend className="mb-2 text-sm font-medium">RF profile</legend>
             <div className="grid gap-2 md:grid-cols-3">{PRESETS.map(p => <button type="button" key={p.mode} aria-label={p.label} aria-describedby={`profile-${p.mode}-purpose`} aria-pressed={preset === p.mode}
               className={`rounded-lg border p-3 text-left transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 disabled:cursor-not-allowed disabled:opacity-50 ${preset === p.mode ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white enabled:hover:border-blue-300 enabled:hover:bg-slate-50'}`}
+              disabled={locked || props.isScanning || !props.profileConfirmed || props.profileFormat === null}
               onClick={() => void run(async () => { await props.onApplyPreset(p.mode); setPreset(p.mode); })}>
               <span className={`block text-sm font-semibold ${preset === p.mode ? 'text-blue-700' : 'text-slate-800'}`}>{p.label}</span>
               <span id={`profile-${p.mode}-purpose`} className="mt-1 block text-xs font-normal leading-5 text-slate-500">{p.purpose}</span>
             </button>)}</div>
+            {(!props.profileConfirmed || props.profileFormat === null) && <p className="mt-2 text-xs text-slate-500">Read RF Link Profile in Settings to confirm the device format.</p>}
             <p className="mt-2 text-xs leading-5 text-slate-500">{preset ? `${PRESETS.find(p => p.mode === preset)!.label} · ${PRESETS.find(p => p.mode === preset)!.detail}` : 'Select a profile to apply it. Until then, the current device settings are used.'}</p>
           </fieldset>
           <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-4">

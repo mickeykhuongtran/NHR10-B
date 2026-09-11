@@ -47,8 +47,7 @@ interface DashboardLayoutProps {
   onWriteData: (epc: string, mem: number, ptr: number, data: string, password?: string) => void;
   writeStatus: 'idle' | 'pending' | 'success' | 'error';
   writeMessage: string;
-  onUpdateSettings: (key: keyof Settings, value: any) => void;
-  onSaveSetting: (key: string, value: any) => void;
+  onRefreshSettings: () => void | Promise<void>;
   onFetchHistory: () => void;
   onDownloadJson: () => void;
   onDownloadCsv: () => void;
@@ -155,6 +154,8 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
               tags={props.tags}
               stats={props.scanStats}
               onApplyPreset={props.onApplyPreset}
+              profileFormat={props.settings.linkProfileFormat ?? null}
+              profileConfirmed={props.settings.linkProfileConfirmed === true}
               onChooseTag={(epc) => { setLocateEpc(epc); selectTab(2); }}
               onOpenStorage={() => selectTab(6)}
               isBusy={props.isLocating || props.isFileTransferring || deviceBusy}
@@ -227,7 +228,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
           )}
 
           {activeTab === 5 && (
-            <DebugTab 
+            <DebugTab onRefreshSettings={props.onRefreshSettings}
               settings={props.settings}
               status={props.status}
               onConnect={props.onConnect}

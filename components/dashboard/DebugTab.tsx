@@ -3,7 +3,6 @@ import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { PageHeader } from './PageHeader';
 import { ConnectionStatus, LogEntry, Settings } from '../../types';
-import { bleService } from '../../services/bleService';
 import { batteryView } from '../../utils/battery';
 
 interface DebugTabProps {
@@ -11,6 +10,7 @@ interface DebugTabProps {
   settings: Settings;
   status: ConnectionStatus;
   isBusy: boolean;
+  onRefreshSettings: () => void | Promise<void>;
   onConnect: () => void;
   onDownloadHistory: () => void;
   onClearLogs: () => void;
@@ -19,7 +19,7 @@ interface DebugTabProps {
   transferProgress: number;
 }
 
-export const DebugTab: React.FC<DebugTabProps> = ({ logs, settings, status, isBusy, onConnect, onDownloadHistory, onClearLogs, onShowPopup }) => {
+export const DebugTab: React.FC<DebugTabProps> = ({ logs, settings, status, isBusy, onConnect, onRefreshSettings, onDownloadHistory, onClearLogs, onShowPopup }) => {
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [follow, setFollow] = useState(true);
@@ -58,7 +58,7 @@ export const DebugTab: React.FC<DebugTabProps> = ({ logs, settings, status, isBu
     <PageHeader title="Diagnostics" subtitle="Inspect device status, reproduce an issue, and export a report for service." actions={<Button variant="outline" onClick={onDownloadHistory}>Export service report</Button>} />
     <section className="shrink-0 rounded-xl border border-slate-200 bg-white p-5">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-base font-semibold">{settings.deviceName || 'NHR-10 reader'}</h2><p className="mt-1 text-xs text-slate-500">Live device information · Battery estimate reported by the reader</p></div>
-        <Button variant="outline" disabled={pending || isBusy || status === 'connecting'} onClick={connected ? () => void run(() => bleService.getSettings()) : onConnect}>{connected ? 'Refresh device info' : status === 'connecting' ? 'Connecting…' : 'Connect device'}</Button>
+        <Button variant="outline" disabled={pending || isBusy || status === 'connecting'} onClick={connected ? () => void run(onRefreshSettings) : onConnect}>{connected ? 'Refresh device info' : status === 'connecting' ? 'Connecting…' : 'Connect device'}</Button>
       </div>
       <dl className="mt-5 grid gap-x-6 gap-y-4 sm:grid-cols-2 xl:grid-cols-3">{telemetry.map(([label, value]) => <div key={label}><dt className="text-xs text-slate-400">{label}</dt><dd className="mt-1 break-all font-mono text-sm text-slate-700">{value}</dd></div>)}</dl>
     </section>

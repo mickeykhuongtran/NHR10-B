@@ -7,7 +7,7 @@ let captured: any;
 const mocks = vi.hoisted(() => ({
   stopScan: vi.fn(), startScan: vi.fn(), stopLocate: vi.fn(), resetLocate: vi.fn(), addLog: vi.fn(),
   scan: { isScanning: false, activeScanType: null, stopScan: vi.fn(), resetScanSession: vi.fn(), handleDataReceived: vi.fn() },
-  connection: { status: 'connected', logs: [], settings: {}, addLog: vi.fn(), setInventoryActive: vi.fn(), handleDataReceived: vi.fn() },
+  connection: { status: 'connected', connectionRevision: 0, logs: [], settings: { linkProfile: 15, linkProfileFormat: 2, linkProfileConfirmed: true }, addLog: vi.fn(), setInventoryActive: vi.fn(), handleDataReceived: vi.fn() },
   ble: { setCallbacks: vi.fn(), writeEpc: vi.fn(), sendCommand: vi.fn() },
 }));
 vi.mock('../components/dashboard/DashboardLayout', () => ({ DashboardLayout: (props: any) => { captured = props; return <div />; } }));
@@ -20,6 +20,8 @@ let root: Root;
 beforeEach(() => {
   vi.useFakeTimers(); vi.clearAllMocks();
   mocks.connection.status = 'connected';
+  mocks.connection.connectionRevision = 0;
+  mocks.connection.settings = { linkProfile: 15, linkProfileFormat: 2, linkProfileConfirmed: true };
   mocks.stopScan.mockResolvedValue(undefined); mocks.startScan.mockResolvedValue(undefined); mocks.ble.writeEpc.mockResolvedValue(undefined);
   mocks.ble.sendCommand.mockResolvedValue(undefined);
   root = createRoot(document.createElement('div'));
@@ -97,4 +99,44 @@ it('blocks scans and tag writes until a settings response is verified', async ()
   await act(async () => mocks.ble.setCallbacks.mock.calls.at(-1)![0]({ cmd: 'GP', val: 20 }));
   expect(captured.settingsActivity).toBeNull();
   await act(async () => captured.onStartScan()); expect(mocks.startScan).toHaveBeenCalledOnce();
+});
+
+const settingsReply = async (data: object) => { await act(async () => { mocks.ble.setCallbacks.mock.calls.at(-1)![0](data); }); };
+it.each([
+  [2, 'standard', 15, 4, 1, 1], [2, 'quick', 11, 2, 0, 0], [2, 'deep', 13, 4, 1, 1], [1, 'standard', 53, 4, 1, 1],
+])('serializes the full Scan preset for format %i, %s', async (format, mode, profile, q, session, focus) => {
+  mocks.connection.settings.linkProfileFormat = Number(format);
+  act(() => root.render(<App />));
+  let pending!: Promise<void>;
+  await act(async () => { pending = captured.onApplyPreset(mode); });
+  const val = `${profile},${q},${session},0`;
+  expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'SRP', val });
+  await act(async () => captured.onStartScan()); expect(mocks.startScan).not.toHaveBeenCalled();
+  await settingsReply({ cmd: 'SRP', status: 'ok', persisted: true, val, format });
+  expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GRP' });
+  await settingsReply({ cmd: 'GRP', val, format });
+  expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'TF', val: focus });
+  await settingsReply({ cmd: 'TF', status: 'ok' });
+  expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GTF' });
+  await settingsReply({ cmd: 'GTF', val: focus });
+  await pending;
+  expect(captured.commandPending).toBe(false);
+});
+it('reads GLP first on every reconnect and waits for each setting response before the next request', async () => {
+  const replies = [
+    { cmd: 'GLP', val: 13, format: 2 }, { cmd: 'GDN', val: 'NHR10-TEST' }, { cmd: 'GP', val: 20 },
+    { cmd: 'GQS', val: '6,255' }, { cmd: 'GQP', val: '30,2,0' }, { cmd: 'GTF', val: 1 }, { cmd: 'GF', val: 'US' },
+  ];
+  for (let revision = 1; revision <= 2; revision++) {
+    mocks.connection.status = 'disconnected'; await act(async () => root.render(<App />));
+    mocks.connection.status = 'connected'; mocks.connection.connectionRevision = revision;
+    const before = mocks.ble.sendCommand.mock.calls.length;
+    await act(async () => root.render(<App />));
+    for (let index = 0; index < replies.length; index++) {
+      expect(mocks.ble.sendCommand).toHaveBeenCalledTimes(before + index + 1);
+      expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: replies[index].cmd });
+      await settingsReply(replies[index]);
+    }
+    expect(captured.settingsActivity).toBeNull();
+  }
 });

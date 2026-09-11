@@ -32,7 +32,7 @@ const fill = (element: HTMLInputElement, value: string) => act(() => {
 const fixture = (): React.ComponentProps<typeof DashboardLayout> => ({
   commandPending: false, settingsActivity: null, onSettingsAction: vi.fn(),
   status: 'disconnected', settings: {
-    power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 53, qValue: 4, session: 1,
+    power: 20, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 53, linkProfileFormat: 1, linkProfileConfirmed: true, qValue: 4, session: 1,
     scanParams: { interval: 30, dwell: 2, count: 0 }, version: 'test', temperature: 24,
     batterySnapshot: null, deviceInfo: '', deviceName: '', deviceCanonicalId: '',
   },
@@ -42,7 +42,7 @@ const fixture = (): React.ComponentProps<typeof DashboardLayout> => ({
   activeScanType: null, onStartScan: vi.fn(), onStopScan: vi.fn(), onStartBatch: vi.fn(), onStopBatch: vi.fn(), onClearTags: vi.fn(),
   onLocate: vi.fn(), onStopLocate: vi.fn(), targetRssi: null, isLocating: false, locateSignalState: 'idle',
   onWriteEpc: vi.fn(), onWriteData: vi.fn(), writeStatus: 'idle', writeMessage: '',
-  onUpdateSettings: vi.fn(), onSaveSetting: vi.fn(), onFetchHistory: vi.fn(), onDownloadJson: vi.fn(), onDownloadCsv: vi.fn(),
+  onRefreshSettings: vi.fn(), onFetchHistory: vi.fn(), onDownloadJson: vi.fn(), onDownloadCsv: vi.fn(),
   onDownloadTxt: vi.fn(), onShare: vi.fn(), onClearFileData: vi.fn(), historyData: [], isBatchSaving: false,
   batchSaveInfo: { state: 'idle', progress: 0, written: 0, total: 0 }, onDownloadLogs: vi.fn(), onClearLogs: vi.fn(),
   isFileTransferring: false, transferProgress: 0, transferStatus: 'idle', onApplyPreset: vi.fn(), onShowPopup: vi.fn(),
@@ -241,4 +241,44 @@ it('preserves settings button identity, focus, drafts and layout during telemetr
   render(<DashboardLayout {...props} />);
   expect(profileCard.querySelector('button')).toBe(read); expect(document.activeElement).toBe(read);
   expect(q.value).toBe('2');
+});
+
+it.each([1, 2] as const)('shows and applies the correct product profile options for format %i', format => {
+  const props = fixture(); props.status = 'connected';
+  props.settings = { ...props.settings, linkProfile: format === 1 ? 53 : 15, linkProfileFormat: format };
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const select = container.querySelector<HTMLSelectElement>('#setting-profile')!;
+  const card = container.querySelector('[aria-label="RF Link Profile"]')!;
+  const apply = [...card.querySelectorAll('button')].find(button => button.textContent === 'Apply')!;
+  expect(select.selectedOptions[0].textContent).toBe('STD — 640 kHz / Miller 4');
+  expect([...select.options].map(option => option.textContent)).toEqual(['STD — 640 kHz / Miller 4', 'QUICK — 640 kHz / FM0', 'DEEP — 160 kHz / Miller 8']);
+  for (const val of [format === 1 ? 53 : 15, 11, 13]) {
+    act(() => { select.value = String(val); select.dispatchEvent(new Event('change', { bubbles: true })); });
+    act(() => apply.click());
+    expect(props.onSettingsAction).toHaveBeenLastCalledWith({ id: 'profile', mode: 'apply', value: val });
+  }
+});
+it.each([0, 5185, 65535])('keeps custom profile %i visible and applies the complete ID', val => {
+  const props = fixture(); props.status = 'connected'; props.settings.linkProfile = val; props.settings.linkProfileFormat = 2;
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const select = container.querySelector<HTMLSelectElement>('#setting-profile')!;
+  expect(select.value).toBe(String(val)); expect(select.selectedOptions[0].textContent).toBe(`${val} (device value)`);
+  const apply = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="RF Link Profile"] button')].find(button => button.textContent === 'Apply')!;
+  act(() => apply.click());
+  expect(props.onSettingsAction).toHaveBeenLastCalledWith({ id: 'profile', mode: 'apply', value: val });
+});
+it('keeps an unknown format explicit and marks cached profile unconfirmed on reconnect', () => {
+  const props = fixture(); props.status = 'connected'; props.settings.linkProfile = 15; props.settings.linkProfileFormat = null;
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  const select = container.querySelector<HTMLSelectElement>('#setting-profile')!;
+  expect(select.options.length).toBe(1); expect(select.selectedOptions[0].textContent).toBe('15 (device value)');
+  expect(container.textContent).toContain('Format unknown');
+  props.settings = { ...props.settings, linkProfileConfirmed: false };
+  render(<DashboardLayout {...props} />);
+  expect(select.value).toBe('15'); expect(container.textContent).toContain('Unconfirmed');
+  const apply = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="RF Link Profile"] button')].find(button => button.textContent === 'Apply')!;
+  expect(apply.disabled).toBe(true);
+  props.settings = { ...props.settings, linkProfileConfirmed: true, linkProfileFormat: 2 };
+  render(<DashboardLayout {...props} />);
+  expect(apply.disabled).toBe(false); expect(select.selectedOptions[0].textContent).toBe('STD — 640 kHz / Miller 4');
 });

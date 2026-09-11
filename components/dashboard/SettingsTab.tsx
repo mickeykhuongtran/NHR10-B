@@ -6,6 +6,7 @@ import { SettingsActivity } from '../../hooks/useSettingsActions';
 import { SettingsRequest } from '../../utils/settingsProtocol';
 import { PageHeader } from './PageHeader';
 import { BLE_DEVICE_NAME_MAX_BYTES, validateBleDeviceName } from '../../utils/deviceName';
+import { parseProfileFormat, profileOptions } from '../../utils/rfLinkProfile';
 
 interface SettingsTabProps {
   isConnected: boolean;
@@ -15,17 +16,11 @@ interface SettingsTabProps {
   onAction: (request: SettingsRequest) => void | Promise<void>;
 }
 
-const LINK_PROFILES = [
-  { id: 11, label: '11 - 640 kHz / FM0' },
-  { id: 13, label: '13 - 160 kHz / Miller 8' },
-  { id: 53, label: '53 - 640 kHz / Miller 4' },
-];
-
 const DWELL_OPTIONS = Array.from({ length: 254 }, (_, index) => index + 2);
 const INTERVAL_OPTIONS = [0, 10, 20, 30, 40, 50, 60];
 const APPEND_OPTIONS = [0, 1, 2, 3, 4];
 const Q_OPTIONS = Array.from({ length: 16 }, (_, index) => index);
-const SESSION_OPTIONS = [0, 1, 2, 3];
+const SESSION_OPTIONS = [0, 1, 2, 3, 255];
 const REGION_OPTIONS: Array<{ label: string; value: RegionBandSelection }> = [
   { label: 'US', value: 'US' },
   { label: 'ETSI', value: 'ETSI' },
@@ -34,22 +29,17 @@ const REGION_OPTIONS: Array<{ label: string; value: RegionBandSelection }> = [
   { label: 'KOR', value: 'KOR' },
   { label: 'Custom', value: 'Custom' },
 ];
-const PROFILE_SELECT_OPTIONS = LINK_PROFILES.map((item) => ({ label: item.label, value: item.id }));
 const DWELL_SELECT_OPTIONS = DWELL_OPTIONS.map((item) => ({ label: String(item), value: item }));
 const INTERVAL_SELECT_OPTIONS = INTERVAL_OPTIONS.map((item) => ({ label: `${item} ms`, value: item }));
 const APPEND_SELECT_OPTIONS = APPEND_OPTIONS.map((item) => ({ label: String(item), value: item }));
 const Q_SELECT_OPTIONS = Q_OPTIONS.map((item) => ({ label: String(item), value: item }));
-const SESSION_SELECT_OPTIONS = SESSION_OPTIONS.map((item) => ({ label: `S${item}`, value: item }));
+const SESSION_SELECT_OPTIONS = SESSION_OPTIONS.map((item) => ({ label: item === 255 ? 'Auto' : `S${item}`, value: item }));
 const FIELD_CLASS = 'h-11 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 focus:border-blue-500';
 const COMPACT_BUTTON_CLASS = 'h-10 text-sm';
 const REGION_MIN_KHZ = 840000;
 const REGION_MAX_KHZ = 960000;
 const VN_REGION_DEFAULT = { startKHz: 918500, count: 9, space125KHz: 4 };
 const clampNumber = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-const normalizeProfileValue = (value: unknown, fallback = 53) => {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-};
 const normalizeRegionNumber = (value: unknown, fallback: number) => {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? Math.round(parsed) : fallback;
@@ -135,9 +125,9 @@ const FieldLabel = ({ children }: { children: React.ReactNode }) => (
 );
 
 const SelectField = ({ id, onChange, options, value }: {
-  id: SelectFieldId; onChange: (value: number) => void; options: SelectOption[]; value: number;
-}) => <select id={'setting-' + id} aria-label={id === 'profile' ? 'RF link profile' : id} className={FIELD_CLASS} value={value} onChange={event => onChange(Number(event.target.value))}>
-  {!options.some(option => option.value === value) && <option value={value}>{value} (device value)</option>}
+  id: SelectFieldId; onChange: (value: number) => void; options: SelectOption[]; value: number | null;
+}) => <select id={'setting-' + id} aria-label={id === 'profile' ? 'RF link profile' : id} className={FIELD_CLASS} value={value ?? ''} onChange={event => { if (event.target.value !== '') onChange(Number(event.target.value)); }}>
+  {value === null ? <option value="" disabled>Not read from device</option> : !options.some(option => option.value === value) && <option value={value}>{value} (device value)</option>}
   {options.map(option => <option value={option.value} key={option.value}>{option.label}</option>)}
 </select>;
 const RegionSelectField = ({ value, onChange }: {
@@ -149,7 +139,9 @@ const RegionSelectField = ({ value, onChange }: {
 export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy, settings, activity, onAction }: SettingsTabProps) {
   const [power, setPower] = useState(settings.power);
   const [deviceName, setDeviceName] = useState(settings.deviceName);
-  const [profile, setProfile] = useState(() => normalizeProfileValue(settings.linkProfile));
+  const [profile, setProfile] = useState(settings.linkProfile);
+  const profileFormat = parseProfileFormat(settings.linkProfileFormat);
+  const profileConfirmed = isConnected && settings.linkProfileConfirmed === true;
   const [qValue, setQValue] = useState(settings.qValue);
   const [session, setSession] = useState(settings.session);
   const [queryInterval, setQueryInterval] = useState(settings.scanParams?.interval || 0);
@@ -181,8 +173,8 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   }, [deviceNameSyncRevision, settings.deviceName]);
 
   useEffect(() => {
-    setProfile(normalizeProfileValue(settings.linkProfile));
-  }, [settings.linkProfile, profileSyncRevision]);
+    setProfile(settings.linkProfile);
+  }, [settings.linkProfile, profileFormat, profileSyncRevision, profileConfirmed]);
 
   useEffect(() => {
     setQValue(settings.qValue);
@@ -223,7 +215,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const handleGetDeviceName = () => onAction({ id: 'device-name', mode: 'read' });
   const handleSetDeviceName = () => onAction({ id: 'device-name', mode: 'apply', value: deviceName });
   const handleGetProfile = () => onAction({ id: 'profile', mode: 'read' });
-  const handleSetProfile = () => onAction({ id: 'profile', mode: 'apply', value: profile });
+  const handleSetProfile = () => { if (profile !== null && profileConfirmed) return onAction({ id: 'profile', mode: 'apply', value: profile }); };
   const handleGetQSession = () => onAction({ id: 'q-session', mode: 'read' });
   const handleSetQSession = () => onAction({ id: 'q-session', mode: 'apply', value: { q: qValue, session } });
   const handleGetQueryParams = () => onAction({ id: 'query-params', mode: 'read' });
@@ -347,10 +339,11 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
           <SelectField
             id="profile"
             value={profile}
-            options={PROFILE_SELECT_OPTIONS}
+            options={profileOptions(profileFormat)}
             onChange={setProfile}
           />
-          <ActionRow {...actionRowProps} id="profile" onGet={handleGetProfile} onSet={handleSetProfile} />
+          <p className="mt-2 text-xs text-slate-500" role="status">{profileConfirmed ? 'Current device value confirmed' : 'Unconfirmed — read from device'} · {profileFormat === null ? 'Format unknown — presets unavailable' : `Format ${profileFormat}`}</p>
+          <ActionRow {...actionRowProps} id="profile" onGet={handleGetProfile} onSet={handleSetProfile} setDisabled={profile === null || !profileConfirmed} />
         </SettingsCard>
 
         <SettingsCard

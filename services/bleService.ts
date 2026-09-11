@@ -1,5 +1,6 @@
 import { ConnectionStatus } from '../types';
 import { assertValidBleDeviceName } from '../utils/deviceName';
+import { assertProfileId } from '../utils/rfLinkProfile';
 
 // --- Web Bluetooth Type Definitions ---
 interface BluetoothDevice extends EventTarget {
@@ -1109,11 +1110,13 @@ class BLEService {
   
   // Baseband: Profile, Q, Session, Target
   async setBaseband(profile: number, q: number, session: number, target = 0) {
+    assertProfileId(profile);
     return this.sendCommand({ cmd: 'SRP', val: `${profile},${q},${session},${target}` });
   }
 
   // New specific setters based on firmware V12.0
   async setLinkProfile(profile: number) {
+    assertProfileId(profile);
     return this.sendCommand({ cmd: 'SLP', val: profile });
   }
 
@@ -1237,22 +1240,6 @@ class BLEService {
     return this.commandQueue;
   }
 
-  // Get Settings: Sends a sequence of commands to fetch device state
-  async getSettings(): Promise<void> {
-    // These will be queued automatically by sendCommand
-    await this.sendCommand({ cmd: 'DI' });
-    await this.sendCommand({ cmd: 'GDN' });
-    await this.sendCommand({ cmd: 'GRI' });
-    await this.getBattery();
-    await this.sendCommand({ cmd: 'GT' });
-    await this.sendCommand({ cmd: 'GP' });
-    await this.sendCommand({ cmd: 'GLP' });
-    await this.sendCommand({ cmd: 'GQS' });
-    await this.sendCommand({ cmd: 'GQP' });
-    await this.sendCommand({ cmd: 'GTF' });
-    await this.sendCommand({ cmd: 'GF' });
-  }
-  
   async requestFileTransfer(): Promise<void> {
     if (!this.device || !this.device.gatt?.connected) {
         throw new Error('Device not connected');
