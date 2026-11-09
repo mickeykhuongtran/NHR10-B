@@ -569,3 +569,13 @@ Device settings now wait for device replies and verify Apply by reading the valu
 - Quick EPC write sends an empty target EPC. The available firmware forwards this to the RFID module with a zero-length EPC selector; there is no firmware-side count check proving that exactly one physical tag is present. Do not assume that multiple tags must yield a failure. Isolate one tag for quick write, or select its EPC in Advanced memory write. Tags sharing an EPC still cannot be distinguished by an EPC-only selector.
 
 Validation: `npm run lint`, `npm test`, and `npm run build`. The development-only `/tests/ui.html` fixture provides command-wait, tag-lost and write-failure controls with simulated tags and continuous RX logs. It never connects to a reader and is not a production build entry point. Hardware write outcomes still require validation on the device and its installed firmware.
+
+
+Excluded EPC tracking:
+
+- Live and Excluded statistics are scoped to their own groups. Excluded shows tags read / tracked, tags reading now (seen within 1.2 seconds during a live scan), total reads, and reads per second. Each tracked row shows its count, last signal, and detection status.
+- **Clear excluded** resets only that group's counts, signal data, and detection status while keeping every selected EPC. **Clear results** resets only Live measurements. Neither action stops scanning. Subsequent reads are measured from the most recent received device counter, so a cumulative firmware count does not bring cleared reads back.
+- **Restore** / **Restore all** move EPCs and their current measurements back to Live. Starting a new scan or disconnecting resets measurements in both groups but retains the selected EPCs for the next scan. The selection lasts until restored or the app is reloaded.
+- Stale filtering hides Live rows without deleting session counters. Excluded rows remain visible when absent from the RF field, and continue updating even while another workspace tab is open. Rates return to zero when there are no new reads or scanning stops. Exclusion groups browser measurements; it does not change the reader's RF inventory or remove RF collisions caused by other tags.
+7. The UI renders the tag list with throttling to stay smooth at high tag rates.
+8. Press `Stop scan`; the app sends `{ "cmd": "X" }` in a short repeated burst to improve reliability in noisy BLE environments.

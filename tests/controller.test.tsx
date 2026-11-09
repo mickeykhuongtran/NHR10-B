@@ -39,6 +39,7 @@ const fixture = (): React.ComponentProps<typeof DashboardLayout> => ({
     batterySnapshot: null, deviceInfo: '', deviceName: '', deviceCanonicalId: '',
   },
   tags: [], logs: [], scanStats: { visibleTags: 0, totalReads: 0, readsPerSecond: 0, uniquePerSecond: 0, averageRssi: null, peakRssi: null },
+  scanExclusions: { tags: [], stats: { visibleTags: 0, totalReads: 0, readsPerSecond: 0, uniquePerSecond: 0, averageRssi: null, peakRssi: null }, excludeTag: vi.fn(), restoreTag: vi.fn(), restoreAll: vi.fn(), clear: vi.fn() },
   isScanning: false, scanStartedAt: null, scanStoppedAt: null, removeStaleTags: false, staleRemoveMs: 3000,
   onChangeRemoveStaleTags: vi.fn(), onChangeStaleRemoveMs: vi.fn(), onConnect: vi.fn(), onDisconnect: vi.fn(),
   activeScanType: null, onStartScan: vi.fn(), onStopScan: vi.fn(), onStartBatch: vi.fn(), onStopBatch: vi.fn(), onClearTags: vi.fn(),

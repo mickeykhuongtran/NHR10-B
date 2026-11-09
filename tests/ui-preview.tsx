@@ -6,6 +6,7 @@ import { parseBatterySnapshot } from '../utils/battery';
 import { DashboardLayout } from '../components/dashboard/DashboardLayout';
 import { LogEntry, Tag, WriteStatus, Settings } from '../types';
 import { useSettingsActions } from '../hooks/useSettingsActions';
+import { useScanLogic } from '../hooks/useScanLogic';
 import { REGION_PRESETS, isRegionPreset } from '../utils/regionBand';
 import { RegionStatusUpdate } from '../types';
 import { DeviceCommand, SETTING_META, parseSettingReading, SettingId } from '../utils/settingsProtocol';
@@ -26,8 +27,6 @@ const simulatedBattery = (scenario: string) => parseBatterySnapshot({
 function Preview() {
   const [connected, setConnected] = useState(false);
   const [batteryScenario, setBatteryScenario] = useState('Normal');
-  const [mode, setMode] = useState<'interactive' | 'batch' | null>(null);
-  const [tags, setTags] = useState<Tag[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [locating, setLocating] = useState(false);
   const [writeStatus, setWriteStatus] = useState<WriteStatus>('idle');
@@ -45,6 +44,29 @@ function Preview() {
   const settingsTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   useEffect(() => () => settingsTimers.current.forEach(clearTimeout), []);
   const log = (message: string, type: LogEntry['type'] = 'info', notice?: LogEntry['notice']) => setLogs(current => [...current, { message, type, timestamp: Date.now(), notice }].slice(-1000));
+  const scan = useScanLogic(log);
+  const scanRef = useRef(scan);
+  scanRef.current = scan;
+  const [pauseTracked, setPauseTracked] = useState(false);
+  const pauseTrackedRef = useRef(pauseTracked);
+  pauseTrackedRef.current = pauseTracked;
+  useEffect(() => {
+    if (!scan.isScanning || scan.activeScanType !== 'interactive') return;
+    const totals = new Map<string, number>();
+    const emit = () => {
+      const excluded = new Set(scanRef.current.exclusions.tags.map(tag => tag.epc));
+      const d = sampleTags.filter(tag => !pauseTrackedRef.current || !excluded.has(tag.epc)).map(tag => {
+        const delta = totals.has(tag.epc) ? 4 : tag.count;
+        const total = (totals.get(tag.epc) ?? 0) + delta;
+        totals.set(tag.epc, total);
+        return [tag.epc, tag.rssi, delta, total];
+      });
+      scanRef.current.handleDataReceived({ cmd: 'live_tags', d });
+    };
+    emit();
+    const timer = window.setInterval(emit, 500);
+    return () => window.clearInterval(timer);
+  }, [scan.isScanning, scan.activeScanType]);
   const sendSimulatedSetting = async (command: DeviceCommand) => {
     log(`TX: ${JSON.stringify(command)}`, 'tx');
     if (settingsTimeout) return;
@@ -112,17 +134,17 @@ function Preview() {
   const props: React.ComponentProps<typeof DashboardLayout> = {
     status: connected ? 'connected' : 'disconnected', commandPending,
     settings, settingsActivity: settingActions.activity, onSettingsAction: async request => { await settingActions.run(request); },
-    tags, logs, scanStats: { visibleTags: tags.length, totalReads: tags.length * 5, readsPerSecond: mode ? 238 : 0, uniquePerSecond: 0, averageRssi: -67, peakRssi: -60 },
-    isScanning: mode !== null, scanStartedAt: null, scanStoppedAt: null, removeStaleTags: false, staleRemoveMs: 3000,
-    onChangeRemoveStaleTags: noop, onChangeStaleRemoveMs: noop,
-    onConnect: () => { setConnected(true); log('Connected to NHR10-TEST'); }, onDisconnect: () => { setConnected(false); setMode(null); setLocating(false); },
-    activeScanType: mode, onStartScan: () => { setMode('interactive'); setTags(sampleTags); }, onStopScan: () => setMode(null), onStartBatch: () => setMode('batch'), onStopBatch: () => setMode(null), onClearTags: () => setTags([]),
+    tags: scan.tags, logs, scanStats: scan.stats, scanExclusions: scan.exclusions,
+    isScanning: scan.isScanning, scanStartedAt: scan.scanStartedAt, scanStoppedAt: scan.scanStoppedAt, removeStaleTags: scan.removeStaleTags, staleRemoveMs: scan.staleRemoveMs,
+    onChangeRemoveStaleTags: scan.setRemoveStaleTags, onChangeStaleRemoveMs: scan.setStaleRemoveMs,
+    onConnect: () => { setConnected(true); log('Connected to NHR10-TEST'); }, onDisconnect: () => { setConnected(false); scan.resetScanSession(); setLocating(false); },
+    activeScanType: scan.activeScanType, onStartScan: () => scan.handleDataReceived({ cmd: 'S' }), onStopScan: () => scan.handleDataReceived({ cmd: 'X' }), onStartBatch: () => scan.handleDataReceived({ cmd: 'SB' }), onStopBatch: () => scan.handleDataReceived({ cmd: 'XB' }), onClearTags: scan.clearTags,
     onLocate: () => setLocating(true), onStopLocate: () => setLocating(false), targetRssi: locating && !lost ? -63 : null, isLocating: locating, locateSignalState: locating ? lost ? 'lost' : 'detected' : 'idle',
     onWriteEpc: write, onWriteData: write, writeStatus, writeMessage: '',
     onRefreshSettings: noop, onFetchHistory: () => setHistory(sampleTags.map((tag, i) => ({ INDEX: i + 1, EPC: tag.epc }))), onDownloadJson: noop, onDownloadCsv: noop, onDownloadTxt: noop, onShare: noop, onClearFileData: () => setHistory([]), historyData: history,
     isBatchSaving: false, batchSaveInfo: { state: 'idle', progress: 0, written: 0, total: 0 }, onDownloadLogs: noop, onClearLogs: () => setLogs([]), isFileTransferring: false, transferProgress: 0, transferStatus: 'idle', onApplyPreset: noop, onShowPopup: () => log('Popup sent: UI fixture'),
   };
-  return <><div style={{ height: 110, padding: '8px 16px', background: '#fffbeb', color: '#92400e', fontSize: 12 }}><p>UI test fixture · Simulated data · No Bluetooth connection</p><div className="mt-1 flex gap-4"><label>Battery <select aria-label="Simulated battery state" value={batteryScenario} onChange={event => setBatteryScenario(event.target.value)}>{Object.keys(batteryScenarios).map(value => <option key={value}>{value}</option>)}</select></label><button onClick={() => setCommandPending(!commandPending)} aria-pressed={commandPending}>Command wait</button><button onClick={() => setLost(!lost)} aria-pressed={lost}>Tag lost</button><button onClick={() => setWriteFails(!writeFails)} aria-pressed={writeFails}>Write failure</button></div><div className="mt-2 flex gap-4"><button onClick={() => setSettingsError(!settingsError)} aria-pressed={settingsError}>Settings error</button><button onClick={() => setSettingsTimeout(!settingsTimeout)} aria-pressed={settingsTimeout}>Settings timeout</button></div></div><DashboardLayout {...props} /></>;
+  return <><div style={{ height: 110, padding: '8px 16px', background: '#fffbeb', color: '#92400e', fontSize: 12 }}><p>UI test fixture · Simulated data · No Bluetooth connection</p><div className="mt-1 flex gap-4"><label>Battery <select aria-label="Simulated battery state" value={batteryScenario} onChange={event => setBatteryScenario(event.target.value)}>{Object.keys(batteryScenarios).map(value => <option key={value}>{value}</option>)}</select></label><button onClick={() => setCommandPending(!commandPending)} aria-pressed={commandPending}>Command wait</button><button onClick={() => setLost(!lost)} aria-pressed={lost}>Tag lost</button><button onClick={() => setWriteFails(!writeFails)} aria-pressed={writeFails}>Write failure</button></div><div className="mt-2 flex gap-4"><button onClick={() => setSettingsError(!settingsError)} aria-pressed={settingsError}>Settings error</button><button onClick={() => setSettingsTimeout(!settingsTimeout)} aria-pressed={settingsTimeout}>Settings timeout</button><button onClick={() => setPauseTracked(!pauseTracked)} aria-pressed={pauseTracked}>Pause excluded reads</button></div></div><DashboardLayout {...props} /></>;
 }
 const root = createRoot(document.getElementById('root')!);
 root.render(<Preview />);

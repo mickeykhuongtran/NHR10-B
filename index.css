@@ -62,6 +62,7 @@
   .scan-metric-compact { min-width: 0; padding: 10px 20px; border-right: 1px solid #e8edf3; }
   .scan-metric-compact:last-child { border-right: 0; }
   .scan-table-row { display: grid; grid-template-columns: 44px minmax(250px,1fr) 116px 90px 170px; align-items: center; min-width: 720px; padding: 0 20px; border-bottom: 1px solid #eef0f3; font-size: 13px; }
+  .scan-table-tracked { grid-template-columns: 44px minmax(250px,1fr) 150px 116px 90px 170px; min-width: 870px; }
   .text-action { color: #2563eb; font-size: 13px; padding: 7px 8px; border-radius: 5px; white-space: nowrap; }
   .text-action:hover { background: #eff5ff; }
   .notification-region { position: fixed; z-index: 220; bottom: 24px; right: 24px; width: min(390px, calc(100vw - 32px)); pointer-events: none; }

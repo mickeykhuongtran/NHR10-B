@@ -19,6 +19,15 @@ const DEFAULT_SCAN_STATS: ScanStats = {
   peakRssi: null,
 };
 
+export interface ScanExclusions {
+  tags: Tag[];
+  stats: ScanStats;
+  excludeTag: (epc: string) => void;
+  restoreTag: (epc: string) => void;
+  restoreAll: () => void;
+  clear: () => void;
+}
+
 const toFiniteNumber = (value: unknown): number | null => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -63,17 +72,22 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
   const [scanStoppedAt, setScanStoppedAt] = useState<number | null>(null);
   const [tags, setTags] = useState<Tag[]>([]);
   const [stats, setStats] = useState<ScanStats>(DEFAULT_SCAN_STATS);
+  const [excludedTags, setExcludedTags] = useState<Tag[]>([]);
+  const [excludedStats, setExcludedStats] = useState<ScanStats>(DEFAULT_SCAN_STATS);
+  const excludedEpcsRef = useRef(new Set<string>());
   // Keep the inventory complete by default. Stale-tag hiding is an opt-in display filter.
   const [removeStaleTags, setRemoveStaleTags] = useState(false);
   const [staleRemoveMs, setStaleRemoveMsState] = useState(DEFAULT_TAG_REMOVE_MS);
   const tagsMap = useRef<Map<string, Tag>>(new Map());
   const rafRef = useRef<number | null>(null);
   const publishTimerRef = useRef<number | null>(null);
-  const pendingTagChangesRef = useRef(false);
   const lastPublishAtRef = useRef(0);
-  const totalReadsRef = useRef(0);
-  const windowReadsRef = useRef(0);
-  const windowUniqueRef = useRef(0);
+  // Keep device counters across a display clear so the next cumulative count
+  // contributes only new reads. A new reader scan resets these baselines.
+  const deviceCountsRef = useRef(new Map<string, number>());
+  const windowReadsRef = useRef(new Map<string, number>());
+  const windowUniqueRef = useRef(new Set<string>());
+  const ratesRef = useRef(new Map<string, { reads: number; unique: number }>());
   const statsLastAtRef = useRef(Date.now());
   const isScanningRef = useRef(false);
   const activeScanTypeRef = useRef<ScanType>(null);
@@ -83,14 +97,16 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
   const resetScanData = useCallback(() => {
     const now = Date.now();
     tagsMap.current.clear();
-    totalReadsRef.current = 0;
-    windowReadsRef.current = 0;
-    windowUniqueRef.current = 0;
-    pendingTagChangesRef.current = false;
+    deviceCountsRef.current.clear();
+    windowReadsRef.current.clear();
+    windowUniqueRef.current.clear();
+    ratesRef.current.clear();
     lastPublishAtRef.current = 0;
     statsLastAtRef.current = now;
     setTags([]);
     setStats(DEFAULT_SCAN_STATS);
+    setExcludedTags(Array.from(excludedEpcsRef.current, epc => ({ epc, timestamp: 0, count: 0 })));
+    setExcludedStats(DEFAULT_SCAN_STATS);
   }, []);
 
   const resetScanSession = useCallback(() => {
@@ -137,11 +153,16 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
     isScanningRef.current = false;
     activeScanTypeRef.current = null;
     bleService.suspendLiveTags();
+    windowReadsRef.current.clear();
+    windowUniqueRef.current.clear();
+    ratesRef.current.clear();
 
     flushSync(() => {
       setIsScanning(false);
       setActiveScanType(null);
       setScanStoppedAt(stoppedAt);
+      setStats(current => ({ ...current, readsPerSecond: 0, uniquePerSecond: 0 }));
+      setExcludedStats(current => ({ ...current, readsPerSecond: 0, uniquePerSecond: 0 }));
     });
   }, []);
 
@@ -149,68 +170,84 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
     setStaleRemoveMsState(normalizeRemoveMs(value));
   }, []);
 
-  const publishVisibleTags = useCallback((force = false) => {
+  const publishVisibleTags = useCallback((sampleRates = true) => {
     const now = Date.now();
-    let hasAgingChanges = false;
     const fadeWindowMs = normalizeRemoveMs(staleRemoveMs);
+    const visibleTags: Tag[] = [];
+    const liveInventory: Tag[] = [];
+    const trackedTags: Tag[] = [];
+    let visibleLiveCount = 0;
 
-    for (const [epc, tag] of tagsMap.current) {
-      const lastSeen = tag.lastSeen ?? tag.timestamp;
-      if (removeStaleTags && now - lastSeen > fadeWindowMs) {
-        tagsMap.current.delete(epc);
-        hasAgingChanges = true;
-        continue;
-      }
-
-      const nextVisibility = getTagVisibility(lastSeen, now);
-      const nextFreshness = getTagFreshness(lastSeen, now, fadeWindowMs);
-      if (tag.visibility !== nextVisibility) {
-        tag.visibility = nextVisibility;
-        hasAgingChanges = true;
-      }
-      if (Math.abs((tag.freshness ?? 1) - nextFreshness) >= 0.08) {
-        tag.freshness = nextFreshness;
-        hasAgingChanges = true;
-      }
-    }
-
-    if (force || pendingTagChangesRef.current || hasAgingChanges) {
-      const visibleTags: Tag[] = Array.from(tagsMap.current.values());
-      const rssiValues = visibleTags
-        .map((tag) => tag.lastRssi ?? tag.rssi)
-        .filter((rssi): rssi is number => typeof rssi === 'number' && Number.isFinite(rssi));
+    if (sampleRates) {
       const elapsedSeconds = Math.max(0.001, (now - statsLastAtRef.current) / 1000);
-      const averageRssi = rssiValues.length > 0
-        ? rssiValues.reduce((sum, rssi) => sum + rssi, 0) / rssiValues.length
-        : null;
-      const peakRssi = rssiValues.length > 0
-        ? rssiValues.reduce((best, rssi) => (rssi > best ? rssi : best), rssiValues[0])
-        : null;
-
-      setTags(visibleTags);
-      setStats({
-        visibleTags: visibleTags.length,
-        totalReads: totalReadsRef.current,
-        readsPerSecond: windowReadsRef.current / elapsedSeconds,
-        uniquePerSecond: windowUniqueRef.current / elapsedSeconds,
-        averageRssi,
-        peakRssi,
-      });
-
-      windowReadsRef.current = 0;
-      windowUniqueRef.current = 0;
+      ratesRef.current.clear();
+      if (isScanningRef.current) {
+        for (const [epc, reads] of windowReadsRef.current) {
+          ratesRef.current.set(epc, {
+            reads: reads / elapsedSeconds,
+            unique: windowUniqueRef.current.has(epc) ? 1 / elapsedSeconds : 0,
+          });
+        }
+      }
+      windowReadsRef.current.clear();
+      windowUniqueRef.current.clear();
       statsLastAtRef.current = now;
-      pendingTagChangesRef.current = false;
-      lastPublishAtRef.current = now;
     }
+
+    for (const tag of tagsMap.current.values()) {
+      const lastSeen = tag.lastSeen ?? tag.timestamp;
+      const snapshot = {
+        ...tag,
+        visibility: getTagVisibility(lastSeen, now),
+        freshness: getTagFreshness(lastSeen, now, fadeWindowMs),
+      };
+      const visible = !removeStaleTags || now - lastSeen <= fadeWindowMs;
+      if (visible) visibleTags.push(snapshot);
+      if (!excludedEpcsRef.current.has(tag.epc)) {
+        liveInventory.push(snapshot);
+        if (visible) visibleLiveCount++;
+      }
+    }
+
+    // Membership survives clears, stale filters and new scans; measurements do not.
+    for (const epc of excludedEpcsRef.current) {
+      const tag = tagsMap.current.get(epc);
+      trackedTags.push(tag ? {
+        ...tag,
+        visibility: getTagVisibility(tag.lastSeen ?? tag.timestamp, now),
+        freshness: getTagFreshness(tag.lastSeen ?? tag.timestamp, now, fadeWindowMs),
+      } : { epc, timestamp: 0, count: 0 });
+    }
+
+    const summarize = (inventory: Tag[], visibleCount: number): ScanStats => {
+      const result = { ...DEFAULT_SCAN_STATS, visibleTags: visibleCount };
+      let rssiSum = 0;
+      let rssiCount = 0;
+      for (const tag of inventory) {
+        result.totalReads += tag.count;
+        const rates = ratesRef.current.get(tag.epc);
+        result.readsPerSecond += rates?.reads ?? 0;
+        result.uniquePerSecond += rates?.unique ?? 0;
+        const rssi = tag.lastRssi ?? tag.rssi;
+        if (typeof rssi === 'number' && Number.isFinite(rssi)) {
+          rssiSum += rssi;
+          rssiCount++;
+          result.peakRssi = result.peakRssi === null ? rssi : Math.max(result.peakRssi, rssi);
+        }
+      }
+      result.averageRssi = rssiCount ? rssiSum / rssiCount : null;
+      return result;
+    };
+
+    setTags(visibleTags);
+    setStats(summarize(liveInventory, visibleLiveCount));
+    setExcludedTags(trackedTags);
+    setExcludedStats(summarize(trackedTags, trackedTags.filter(tag => tag.count > 0).length));
+    lastPublishAtRef.current = now;
   }, [removeStaleTags, staleRemoveMs]);
 
-  const requestPublish = useCallback((force = false) => {
-    if (force) {
-      pendingTagChangesRef.current = true;
-    }
-
-    if (rafRef.current !== null) return;
+  const requestPublish = useCallback(() => {
+    if (rafRef.current !== null || publishTimerRef.current !== null) return;
 
     const elapsed = Date.now() - lastPublishAtRef.current;
     const delay = Math.max(0, TAG_RENDER_INTERVAL_MS - elapsed);
@@ -218,7 +255,7 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
     const runPublish = () => {
       publishTimerRef.current = null;
       rafRef.current = requestAnimationFrame(() => {
-        publishVisibleTags(force);
+        publishVisibleTags();
         rafRef.current = null;
       });
     };
@@ -231,6 +268,33 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
     if (publishTimerRef.current === null) {
       publishTimerRef.current = window.setTimeout(runPublish, delay);
     }
+  }, [publishVisibleTags]);
+
+  const excludeTag = useCallback((epc: string) => {
+    if (!tagsMap.current.has(epc)) return;
+    excludedEpcsRef.current.add(epc);
+    publishVisibleTags(false);
+  }, [publishVisibleTags]);
+
+  const restoreTag = useCallback((epc: string) => {
+    excludedEpcsRef.current.delete(epc);
+    publishVisibleTags(false);
+  }, [publishVisibleTags]);
+
+  const restoreAll = useCallback(() => {
+    excludedEpcsRef.current.clear();
+    publishVisibleTags(false);
+  }, [publishVisibleTags]);
+
+  const clearGroup = useCallback((excluded: boolean) => {
+    for (const epc of tagsMap.current.keys()) {
+      if (excludedEpcsRef.current.has(epc) !== excluded) continue;
+      tagsMap.current.delete(epc);
+      windowReadsRef.current.delete(epc);
+      windowUniqueRef.current.delete(epc);
+      ratesRef.current.delete(epc);
+    }
+    publishVisibleTags(false);
   }, [publishVisibleTags]);
 
   useEffect(() => {
@@ -299,17 +363,23 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
         return;
       }
 
+      const safeCountDelta = Math.max(0, Math.trunc(countDelta));
+      const deviceCount = Math.max(0, Math.trunc(totalCount));
+      const previousDeviceCount = deviceCountsRef.current.get(epc);
+      const newReads = previousDeviceCount === undefined ? deviceCount
+        : deviceCount >= previousDeviceCount ? deviceCount - previousDeviceCount : safeCountDelta;
+      deviceCountsRef.current.set(epc, deviceCount);
+      if (newReads === 0) return;
+
       const existingTag = tagsMap.current.get(epc);
-      const tag = existingTag ?? {
+      const tag = existingTag ? { ...existingTag } : {
         epc,
         timestamp: now,
         firstSeen: now,
         count: 0,
       };
-      const safeCountDelta = Math.max(0, Math.trunc(countDelta));
-
-      tag.count = Math.max(0, Math.trunc(totalCount));
-      tag.delta = safeCountDelta;
+      tag.count += newReads;
+      tag.delta = newReads;
       tag.lastRssi = rssi;
       tag.rssi = rssi;
       tag.lastSeen = now;
@@ -319,16 +389,15 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
       tag.visibility = 'active';
 
       tagsMap.current.set(epc, tag);
-      windowReadsRef.current += safeCountDelta;
-      totalReadsRef.current += safeCountDelta;
+      windowReadsRef.current.set(epc, (windowReadsRef.current.get(epc) ?? 0) + newReads);
       if (!existingTag) {
-        windowUniqueRef.current++;
+        windowUniqueRef.current.add(epc);
       }
       hasChanges = true;
     });
 
     if (hasChanges) {
-      requestPublish(true);
+      requestPublish();
     }
   }, [addLog, applyDeviceScanStarted, applyDeviceScanStopped, requestPublish]);
 
@@ -454,7 +523,7 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
   };
 
   const clearTags = () => {
-    resetScanData();
+    clearGroup(false);
   };
 
   return {
@@ -466,6 +535,14 @@ export const useScanLogic = (addLog: (msg: string, type: 'info' | 'error' | 'rx'
     staleRemoveMs,
     tags,
     stats,
+    exclusions: {
+      tags: excludedTags,
+      stats: excludedStats,
+      excludeTag,
+      restoreTag,
+      restoreAll,
+      clear: () => clearGroup(true),
+    } satisfies ScanExclusions,
     setRemoveStaleTags,
     setStaleRemoveMs,
     startScan,

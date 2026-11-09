@@ -330,6 +330,7 @@ const handleDataReceived = useCallback((data: any) => {
       settings={connection.settings}
       tags={scan.tags}
       scanStats={scan.stats}
+      scanExclusions={scan.exclusions}
       logs={connection.logs}
       commandPending={commandPending}
       settingsActivity={settingsActions.activity}

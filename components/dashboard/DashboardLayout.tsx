@@ -7,6 +7,7 @@ import { Notification } from '../ui/Notification';
 import { Button } from '../ui/Button';
 import { TopBar } from './TopBar';
 import { ScannerTab } from './ScannerTab';
+import type { ScanExclusions } from '../../hooks/useScanLogic';
 import { LocateTab } from './LocateTab';
 import { OperationsTab } from './OperationsTab';
 import { SettingsTab } from './SettingsTab';
@@ -19,6 +20,7 @@ interface DashboardLayoutProps {
   settings: Settings;
   tags: Tag[];
   scanStats: ScanStats;
+  scanExclusions: ScanExclusions;
   logs: LogEntry[];
   commandPending: boolean;
   settingsActivity: SettingsActivity | null;
@@ -72,8 +74,6 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
   const { notice, dismiss } = useNotifications(props.logs);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [locateEpc, setLocateEpc] = useState<string>('');
-  const [scannerExcludedEpcs, setScannerExcludedEpcs] = useState<string[]>([]);
-  const [scannerExcludedSnapshots, setScannerExcludedSnapshots] = useState<Record<string, Tag>>({});
 
   const tabs = [
     { id: 1, label: 'Scan tags', detail: 'Live inventory' },
@@ -164,10 +164,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
               isConnected={props.status === 'connected'}
               onConnect={props.onConnect}
               batchSaveInfo={props.batchSaveInfo}
-              excludedEpcs={scannerExcludedEpcs}
-              excludedSnapshots={scannerExcludedSnapshots}
-              setExcludedEpcs={setScannerExcludedEpcs}
-              setExcludedSnapshots={setScannerExcludedSnapshots}
+              exclusions={props.scanExclusions}
             />
           )}
           
