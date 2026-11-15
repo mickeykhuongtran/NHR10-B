@@ -87,6 +87,25 @@ it('fits the worst-case status in one 182-byte notification', () => {
   const packet = { ...ready, s: 'cancelled', id: 0xffffffff, n: 0xffffffff, e: 'F'.repeat(32), a: 2, t: 3000, b: 12, g: 3000, r: 6, z: 1 };
   expect(new TextEncoder().encode(JSON.stringify(packet)).length).toBeLessThanOrEqual(182);
 });
+it('explains data integrity errors without turning passing metrics into a quality verdict', () => {
+  rx({ ...ready, s: 'error', r: 2, id: 1, e: 'E280689400005035E6130838', n: 186, t: 2999, b: 12, g: 49 });
+  const value = controller;
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  expect(container.textContent).toContain('Read data integrity error');
+  expect(container.textContent).toContain('r=2');
+  expect(container.textContent).toContain('not a tag quality verdict');
+  expect(container.textContent).toContain('lowering thresholds will not resolve');
+  expect(container.textContent).not.toContain('TAG OK');
+});
+it('explains total reads, time coverage and longest silence separately', () => {
+  rx(off);
+  const value = controller;
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  expect(container.textContent).toContain('not 30 reads per second');
+  expect(container.textContent).toContain('12 windows');
+  expect(container.textContent).toContain('start to first read and last read to the end');
+  expect(container.querySelector('#ti-gap')?.getAttribute('aria-describedby')).toBe('ti-gap-help');
+});
 it('keeps the Normal button disabled while a detected second tag is still being stopped', () => {
   rx({ ...ready, s: 'more', z: 1 });
   const value = controller;

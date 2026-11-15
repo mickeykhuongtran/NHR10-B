@@ -45,12 +45,12 @@ Notifications arrive approximately 5 Hz during measurement. Query GTI to recover
 
 One trigger press checks the current RF configuration, then starts a fixed 3-second window. A changed configuration after reader reset invalidates the trial. A second press cancels. The timer does not restart on the first tag. Allow the RF stop/tail-drain period before the final verdict. Every trigger starts an independent trial; there is no enforced retry identity or replacement decision.
 
-LCD: TAG INSURANCE header, scanning icon until the first EPC, then last six EPC characters, recent read/s, signal segments and elapsed-time bar. No TESTING/MORE TAG/Signal labels or footer instructions. Rate is calculated on the device over completed 100 ms bins in a trailing window up to one second; cumulative `n` remains unchanged in the BLE contract.
+LCD: Bluetooth/battery status, TAG INSURANCE header, gray RF-wave icon when idle and green while scanning until the first EPC, then last six EPC characters, recent read/s, signal segments and elapsed-time bar. No TESTING/MORE TAG/Signal labels or footer instructions. Rate is calculated on the device over completed 100 ms bins in a trailing window up to one second; cumulative `n` remains unchanged in the BLE contract.
 
-- TAG OK: green tick popup for 2 seconds and two beeps.
-- CHECK TAG / NO READ: yellow popup for 2 seconds; no retry/replacement workflow.
-- Second EPC: red ERROR popup for 1 second, stop and return to waiting. API `s` remains `more` so the app can explain the cause.
-- Device/data errors: red ERROR popup; reason retained in `r`.
+- TAG OK: black overlay with a green tick and white TAG OK for 2 seconds and two beeps.
+- CHECK TAG / NO READ: black overlay with a yellow ! and white result text for 2 seconds; no retry/replacement workflow.
+- Second EPC: black overlay with a red ! and white ERROR for 1 second, stop and return to waiting. API `s` remains `more` so the app can explain the cause.
+- Device/data errors: black overlay with a red ! and white ERROR; reason retained in `r`.
 - Cancel: return to waiting without a verdict.
 
 Popup timeout is local presentation only; GTI retains the last result. Repeated GTI must not reopen old LCD popups. A new trigger dismisses the popup immediately and starts the next trial if idle. An error popup may remain longer if RF is still draining; the next trial cannot begin before idle. The app retains its result card for review.
@@ -59,3 +59,11 @@ No host scan/start command is needed in this workflow. Use the physical trigger.
 Count measures reader reports, not intrinsic tag quality or an independent RF timestamp. Verify good and bad samples under the same distance/orientation before selecting production thresholds. A single detected EPC cannot prove physical identity or absence of other tags that did not respond.
 
 Validation: `npm run lint` (TypeScript without output), `npm run test`. Publication is handled separately by Vercel's Git integration. End-to-end BLE and RF calibration require the updated reader firmware on hardware.
+
+## Threshold meaning and invalid results
+
+- Minimum reads: cumulative reports over all 3 seconds; 30 is not 30 read/s.
+- Active 250 ms windows: at least one read in each counted window, out of 12. This measures time coverage, not continuous RF-on duration.
+- Longest silence: no-read interval including initial and final gaps as well as intervals between reads.
+
+All three must pass with exactly one EPC and a valid measurement. `s:error,r:2` is a data-integrity/finalization error, even if count/bins/gap meet the thresholds. The UI now displays the specific reason and does not recommend lowering thresholds or replacing a tag on this error. Firmware fixes a reproducible 6-byte STOP ACK being left in a parser that previously waited for 7 bytes. Actual CRC errors/truncated data remain invalid. Other r=2 causes require the firmware's detailed `Insurance invalid` log.

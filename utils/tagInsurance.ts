@@ -26,12 +26,26 @@ export const insuranceTitles: Record<InsuranceState, string> = {
   off: 'Normal scanning', ready: 'READY', preparing: 'CHECK RF', running: 'SCANNING', ok: 'TAG OK', check: 'CHECK TAG',
   no_read: 'NO READ', more: 'ERROR', cancelled: 'CANCELLED', error: 'ERROR',
 };
+export function insuranceErrorReason(v: InsuranceSnapshot): string {
+  if (v.state !== 'error') return '';
+  const reasons: Record<number, string> = {
+    0: 'Unspecified device error', 1: 'RF communication or setup error',
+    2: 'Read data integrity error', 3: 'Unsupported or malformed EPC',
+    4: 'Legacy firmware retry mismatch', 5: 'Battery cannot support RF',
+    6: 'Previous RF settings recovery failed',
+  };
+  return reasons[v.reason] ?? 'Unknown device error';
+}
 export function insuranceInstruction(v: InsuranceSnapshot): string {
   if (v.state === 'preparing') return 'The reader is checking that your RF settings are unchanged. The 3-second measurement starts after this check.';
   if (v.state === 'running') return 'Keep the product at the marked position. Tap the trigger again to cancel.';
   if (v.state === 'more') return 'More than one EPC detected. Isolate one product, then tap the trigger again.';
   if (v.state === 'check' || v.state === 'no_read') return 'This test did not pass at the current RF setup and position. Each trigger press starts an independent test.';
-  if (v.state === 'error') return v.reason === 4 ? 'A different EPC appeared during the retry. Return to the same product and retry.'
+  if (v.state === 'error') return v.reason === 2
+    ? 'The reader could not finalize the received data reliably. This is not a tag quality verdict, even if all three thresholds are met. Check the firmware and Diagnostics; lowering thresholds will not resolve this error.'
+    : v.reason === 1 ? 'The reader did not confirm its RF setup or start/stop operation. Stop Tag Insurance, read the RF settings and try again.'
+    : v.reason === 3 ? 'The reader reported an EPC that this firmware cannot validate. This is not a tag quality verdict.'
+    : v.reason === 4 ? 'Older firmware rejected the EPC during a retry. Update to the independent-trial firmware.'
     : v.reason === 5 ? 'Battery cannot support this test. Charge the reader before retrying.'
     : v.reason === 6 ? 'Previous firmware settings could not be recovered. Stop Tag Insurance to retry recovery, or restart the device.'
     : 'The measurement is invalid. Check the reader/link and retry; this is not a tag quality verdict.';

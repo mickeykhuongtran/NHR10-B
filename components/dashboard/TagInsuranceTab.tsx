@@ -3,7 +3,7 @@ import { TagInsuranceController } from '../../hooks/useTagInsurance';
 import { SettingsActivity } from '../../hooks/useSettingsActions';
 import { Settings } from '../../types';
 import { SettingsRequest } from '../../utils/settingsProtocol';
-import { defaultInsuranceConfig, insuranceInstruction, insuranceTitles, validInsuranceConfig } from '../../utils/tagInsurance';
+import { defaultInsuranceConfig, insuranceErrorReason, insuranceInstruction, insuranceTitles, validInsuranceConfig } from '../../utils/tagInsurance';
 import { Button } from '../ui/Button';
 import { SettingsTab } from './SettingsTab';
 
@@ -12,6 +12,14 @@ type Props = {
   settings: Settings; settingsActivity: SettingsActivity | null;
   onSettingsAction: (request: SettingsRequest) => void | Promise<void>;
 };
+const thresholdFields = [
+  { key: 'min', label: 'Minimum reads in 3 s', min: 1, max: 10000,
+    help: 'Total valid reports of the same EPC during the whole test. 30 means at least 30 reports, not 30 reads per second.' },
+  { key: 'bins', label: 'Active 250 ms windows', min: 1, max: 12,
+    help: 'The 3 seconds are split into 12 windows. A window counts once when it contains a read. 10 requires reads in at least 10 different windows, so one fast burst is not enough.' },
+  { key: 'gap', label: 'Longest silence (ms)', min: 100, max: 3000,
+    help: 'Maximum allowed time without a read, including start to first read and last read to the end. 500 allows no silence longer than half a second.' },
+] as const;
 export function TagInsuranceTab({ controller: c, connected, busy, settings, settingsActivity, onSettingsAction }: Props) {
   const [draft, setDraft] = useState(defaultInsuranceConfig);
   const v = c.snapshot;
@@ -31,6 +39,7 @@ export function TagInsuranceTab({ controller: c, connected, busy, settings, sett
     {enabled && <div className={`rounded-2xl border p-5 ${v.state === 'ok' && !v.busy ? 'border-emerald-300 bg-emerald-50' : 'border-slate-200 bg-white'}`}>
       <p className="text-xs uppercase tracking-wide text-slate-500">Test {v.id}</p>
       <h2 role="status" className="mt-2 text-2xl font-semibold">{v.busy && v.state !== 'running' && v.state !== 'preparing' ? 'Finishing…' : insuranceTitles[v.state]}</h2>
+      {v.state === 'error' && <p className="mt-2 text-sm font-medium text-red-700">{insuranceErrorReason(v)} · r={v.reason}</p>}
       <p className="my-3 font-mono text-3xl tracking-widest">{v.epc.slice(-6) || '------'}</p>
       <progress aria-label="Test elapsed time" className="mt-4 w-full" max={3000} value={v.elapsed} />
       <p className="mt-2 text-sm">{v.count} reads · {(v.elapsed / 1000).toFixed(1)} / 3.0 s</p>
@@ -51,9 +60,12 @@ export function TagInsuranceTab({ controller: c, connected, busy, settings, sett
       <summary className="cursor-pointer font-medium">Pass criteria</summary>
       <fieldset disabled={!connected || enabled || c.pending || busy} className="mt-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          {([['min', 'Minimum reads', 1, 10000], ['bins', 'Occupied 250 ms bins', 1, 12], ['gap', 'Maximum gap (ms)', 100, 3000]] as const).map(([key, label, min, max]) =>
-            <label key={key} className="text-sm">{label}<input type="number" min={min} max={max} step={1} value={enabled ? c.config[key] : draft[key]}
-              onChange={e => setDraft(previous => ({ ...previous, [key]: Number(e.target.value) }))} className="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 disabled:bg-slate-100" /></label>)}
+          {thresholdFields.map(({ key, label, min, max, help }) =>
+            <div key={key} className="text-sm"><label htmlFor={`ti-${key}`}>{label}</label>
+              <input id={`ti-${key}`} aria-describedby={`ti-${key}-help`} type="number" min={min} max={max} step={1} value={enabled ? c.config[key] : draft[key]}
+                onChange={e => setDraft(previous => ({ ...previous, [key]: Number(e.target.value) }))} className="mt-2 block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 disabled:bg-slate-100" />
+              <p id={`ti-${key}-help`} className="mt-2 text-xs leading-5 text-slate-500">{help}</p>
+            </div>)}
         </div>
         <p className="mt-4 text-xs leading-5 text-slate-500">Exactly one EPC and all three thresholds must pass across 3 seconds, including the first and last no-read gaps. Initial thresholds are provisional. Each trigger starts a new independent test; the device does not decide when to replace a tag.</p>
       </fieldset>
