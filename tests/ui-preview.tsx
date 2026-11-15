@@ -71,18 +71,24 @@ function Preview() {
     log(`TX: ${JSON.stringify(command)}`, 'tx');
     if (settingsTimeout) return;
     settingsTimers.current.push(setTimeout(() => {
-      const entry = Object.entries(SETTING_META).find(([, meta]) => meta.get === command.cmd || meta.set === command.cmd);
+      const entry = Object.entries(SETTING_META).find(([id, meta]) => meta.get === command.cmd || meta.set === command.cmd || (id === 'tag-focus' && command.cmd === 'STF'));
       const id = entry?.[0] as SettingId | undefined;
       const meta = entry?.[1];
       let response: any = { cmd: command.cmd, status: settingsError ? 'err' : 'ok', ...(settingsError ? { msg: 'Simulated device rejection' } : {}) };
       if (!settingsError && meta) {
-        if (command.cmd === meta.set) {
+        if (command.cmd === meta.set || command.cmd === 'STF') {
           const parts = String(command.val).split(',').map(Number);
           simulatedReadings.current[meta.get] = id === 'q-session' ? { q: parts[0], session: parts[1] } : id === 'query-params' ? { interval: parts[0], dwell: parts[1], times: parts[2] } : id === 'region-band' ? { ...command, mode: command.mode ?? 'template' } : { val: command.val };
           if (id === 'region-band' && isRegionPreset(command.val)) {
             const plan = REGION_PRESETS[command.val];
             simulatedReadings.current.GF = { status: 'ok', val: command.val, mode: 'template', band: plan.band, min_ch: plan.minCh, max_ch: plan.maxCh, start_khz: plan.startKHz, end_khz: plan.endKHz, count: plan.count, step_khz: plan.stepKHz };
             response = { cmd: 'SF', status: 'ok', val: command.val, band: plan.band, min_ch: plan.minCh, max_ch: plan.maxCh, saved: command.save, verified: true };
+          }
+          if (id === 'baseband') {
+            simulatedReadings.current.GRP = { val: command.val, format: 2 };
+            simulatedReadings.current.GLP = { val: parts[0], format: 2 };
+            settingActions.handleDataReceived({ cmd: 'GLP', ...simulatedReadings.current.GLP });
+            response = { cmd: 'SRP', status: 'ok' };
           }
           if (id === 'profile') {
             simulatedReadings.current.GLP.format = 2;

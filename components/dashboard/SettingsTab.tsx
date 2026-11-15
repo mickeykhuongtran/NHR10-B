@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertTriangle, SlidersHorizontal } from 'lucide-react';
+import { SlidersHorizontal } from 'lucide-react';
 import { Button } from '../ui/Button';
 import { RegionBandSelection, Settings as SettingsType } from '../../types';
 import { SettingsActivity } from '../../hooks/useSettingsActions';
@@ -16,12 +16,12 @@ interface SettingsTabProps {
   onAction: (request: SettingsRequest) => void | Promise<void>;
 }
 
-const DWELL_OPTIONS = Array.from({ length: 254 }, (_, index) => index + 2);
+const DWELL_OPTIONS = [0, ...Array.from({ length: 254 }, (_, index) => index + 2)];
 const INTERVAL_OPTIONS = [0, 10, 20, 30, 40, 50, 60];
-const APPEND_OPTIONS = [0, 1, 2, 3, 4];
+const APPEND_OPTIONS = [0, 1, 2, 3, 4, 5];
 const Q_OPTIONS = Array.from({ length: 16 }, (_, index) => index);
 const SESSION_OPTIONS = [0, 1, 2, 3, 255];
-const DWELL_SELECT_OPTIONS = DWELL_OPTIONS.map((item) => ({ label: String(item), value: item }));
+const DWELL_SELECT_OPTIONS = DWELL_OPTIONS.map((item) => ({ label: item === 0 ? '0 (reader default)' : String(item), value: item }));
 const INTERVAL_SELECT_OPTIONS = INTERVAL_OPTIONS.map((item) => ({ label: `${item} ms`, value: item }));
 const APPEND_SELECT_OPTIONS = APPEND_OPTIONS.map((item) => ({ label: String(item), value: item }));
 const Q_SELECT_OPTIONS = Q_OPTIONS.map((item) => ({ label: String(item), value: item }));
@@ -123,7 +123,6 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const regionWritable = regionConfirmed && settings.regionBandSupport === 'supported';
   const activeActionKey = activity ? activity.id + ':' + activity.mode : null;
   const actionRowProps = { activity, locked: !isConnected || isBusy };
-  const [confirmSave, setConfirmSave] = useState(false);
   const powerSyncRevision = settings.syncRevision?.power ?? 0;
   const profileSyncRevision = settings.syncRevision?.linkProfile ?? 0;
   const qSessionSyncRevision = settings.syncRevision?.qSession ?? 0;
@@ -163,9 +162,6 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
     setAppend(settings.scanParams.append || 0);
   }, [queryParamsSyncRevision, settings.scanParams?.append, settings.scanParams?.dwell, settings.scanParams?.interval]);
 
-  useEffect(() => {
-    if (!isConnected || isBusy) setConfirmSave(false);
-  }, [isConnected, isBusy]);
 
   const handleGetPower = () => onAction({ id: 'power', mode: 'read' });
   const handleSetPower = () => onAction({ id: 'power', mode: 'apply', value: power });
@@ -178,6 +174,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   const handleSetQueryParams = () => onAction({ id: 'query-params', mode: 'apply', value: { interval: queryInterval, dwell, append } });
   const handleGetTagFocus = () => onAction({ id: 'tag-focus', mode: 'read' });
   const handleSetTagFocus = () => onAction({ id: 'tag-focus', mode: 'apply', value: tagFocus });
+  const handleSaveTagFocus = () => { if (!activity) return onAction({ id: 'tag-focus', mode: 'apply', value: tagFocus, persist: true }); };
   const handleGetRegion = () => onAction({ id: 'region-band', mode: 'read' });
   const adjustPower = (delta: number) => setPower((current) => clampNumber(current + delta, 0, 30));
   const handleSetRegion = () => {
@@ -284,7 +281,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
           <ActionRow {...actionRowProps} id="q-session" onGet={handleGetQSession} onSet={handleSetQSession} />
         </SettingsCard>
 
-        <SettingsCard actionId="tag-focus" activeActionKey={activeActionKey} title="Tag Focus" subtitle="Singulation assist">
+        <SettingsCard actionId="tag-focus" activeActionKey={activeActionKey} title="Tag Focus" subtitle="Apply temporarily or save for restart">
           <div className="soft-surface relative grid grid-cols-2 rounded-md border border-[#2563eb]/24 p-1">
             <span
               aria-hidden="true"
@@ -308,6 +305,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
             ))}
           </div>
           <ActionRow {...actionRowProps} id="tag-focus" onGet={handleGetTagFocus} onSet={handleSetTagFocus} />
+          <Button variant="outline" size="sm" className="mt-2 w-full" disabled={!isConnected || isBusy || activity !== null} onClick={handleSaveTagFocus}>Save Tag Focus</Button>
         </SettingsCard>
 
         <SettingsCard
@@ -382,7 +380,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
               <FieldLabel>Dwell</FieldLabel>
               <SelectField
                 id="dwell"
-                value={clampNumber(dwell, 2, 255)}
+                value={dwell}
                 options={DWELL_SELECT_OPTIONS}
                 onChange={setDwell}
               />
@@ -400,32 +398,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
           <ActionRow {...actionRowProps} id="query-params" onGet={handleGetQueryParams} onSet={handleSetQueryParams} />
         </SettingsCard>
 
-        <section className="soft-glass rounded-lg p-3 xl:col-span-2">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h3 className="text-sm font-semibold text-slate-700">Save Configuration</h3>
-              <p className="mt-0.5 text-xs font-normal text-[#64748b]">Requires configuration-save support in the installed firmware</p>
-            </div>
-            <Button onClick={() => { if (!activity) setConfirmSave(true); }} disabled={!isConnected} aria-disabled={Boolean(activity)} title={!isConnected ? 'Connect the NHR-10 before saving configuration' : undefined} variant="primary" size="md" className="h-10 w-full font-bold tracking-wide md:h-9 md:w-auto md:min-w-[220px]">
-              Save configuration
-            </Button>
-          </div>
-          {confirmSave && (
-            <div role="alertdialog" aria-labelledby="confirm-save-title" className="mt-3 flex flex-col gap-3 rounded-lg border border-[#FF9500]/35 bg-[#FFF7E8] p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-start gap-2.5">
-                <AlertTriangle size={18} className="mt-0.5 shrink-0 text-[#C56A00]" />
-                <div>
-                  <h4 id="confirm-save-title" className="text-xs font-bold text-[#7A3F00]">Persist current configuration?</h4>
-                  <p className="mt-0.5 text-xs font-medium leading-4 text-[#8A5A24]">This overwrites the configuration stored in device flash.</p>
-                </div>
-              </div>
-              <div className="flex gap-2 sm:shrink-0">
-                <Button variant="outline" size="sm" onClick={() => setConfirmSave(false)} className="h-9 flex-1 sm:min-w-[90px]">Cancel</Button>
-                <Button variant="danger" size="sm" onClick={() => { if (!activity) void onAction({ id: 'config', mode: 'save' }); setConfirmSave(false); }} className="h-9 flex-1 sm:min-w-[130px]">Confirm save</Button>
-              </div>
-            </div>
-          )}
-        </section>
+        <p className="text-xs leading-5 text-slate-500 xl:col-span-2">Power, RF profile, Q/session and query parameters are saved when applied. Tag Focus Apply is temporary; use Save Tag Focus to retain it after restart. Region uses its own Save option.</p>
       </fieldset>
     </div>
   );

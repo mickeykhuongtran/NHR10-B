@@ -51,10 +51,10 @@ npm run lint
 The controller opens on **Scan tags**, with a three-step connection and inventory guide. Main navigation contains **Scan tags**, **Find a tag**, **Write EPC**, and **Saved data**. **Advanced** contains **Device settings** and **Diagnostics**; the Develop/camera tab has been removed.
 
 - **Scan tags:** Start scan shows live EPCs. Scan to device records a batch on the reader. Scan options holds RF presets and the stale-tag timeout, entered directly in milliseconds. Find tag carries an EPC into the locating view. Excluded tags can be restored.
-- **Find a tag:** Select a scanned EPC or enter it manually. Positive firmware signal values are labelled reader units; negative RSSI values are labelled dBm. The signal bar is relative, not a distance estimate.
+- **Find a tag:** Select a scanned EPC or enter it manually (up to 32 hexadecimal characters on REVB). Positive firmware signal values are labelled reader units; negative RSSI values are labelled dBm. The signal bar is relative, not a distance estimate.
 - **Write EPC:** Validate hexadecimal words, review the selected data, and confirm before writing. Advanced memory writing stays collapsed until needed. A missing write acknowledgement times out after 10 seconds and asks the operator to verify the tag before retrying.
 - **Saved data:** Stop and save the batch, then retrieve its EPC list. CSV, TXT, JSON, and sharing are available after download. Clear preview only clears the browser data.
-- **Device settings:** Read retrieves the current device value; Apply sends an update. Save configuration persists applied settings. RF edits and conflicting operations are disabled while the device is busy.
+- **Device settings:** Read retrieves the current device value; Apply waits for the setting acknowledgement and matching read-back. Power, profile, Q/session and query parameters persist on Apply. Tag Focus has separate temporary Apply and Save actions; Region has an explicit Save checkbox. RF edits and conflicting operations are disabled while the device is busy.
 - **Diagnostics:** Inspect identity, firmware, voltage, charger and temperature; filter or search TX/RX/error events; test the reader display/buzzer. Export service report downloads device state, environment details, operation state, and up to 1,000 retained log entries as JSON.
 
 Browser notices expire after **4.2 seconds** (normal) or **6.5 seconds** (errors). Notification timers are independent of incoming BLE traffic. Identical repeated events are suppressed for 10 seconds, and notices can be dismissed manually. Full events remain in Diagnostics.
@@ -78,10 +78,10 @@ For browser UI checks, run the development server and open `/tests/ui.html`. Thi
 1. Open the web app.
 2. Press `Connect`.
 3. The browser opens the Bluetooth device picker.
-4. Select the device by its configured advertising name. A factory/default unit uses `NHR10-XXXXXX`; legacy `NHR-10` and `Nextwaves` names remain supported during migration.
+4. Select `NHR-10`, the advertising name of the current REVB firmware. The transport also supports `NHR10-XXXXXX` and `Nextwaves` devices.
 5. The app connects to GATT, gets service `FF`, discovers characteristics `FF01`, `FF02`, and `FF03`, and starts notifications on `FF01`.
-6. The web client issues `DI` over `FF01` and verifies its Canonical ID (`NHR10-` plus 12 hexadecimal MAC digits). For a default `NHR10-XXXXXX` name it also verifies the six-digit suffix; a configured free-form name remains separate from identity. It does not read Device Information Serial Number `0x2A25`, which Web Bluetooth blocklists for privacy.
-7. Only after identity verification succeeds does the app mark the transport ready and read the initial reader state: configured Bluetooth name, firmware, battery, power, link profile, Q/session, query params, Tag Focus, region, and temperature.
+6. The web client issues `DI` over `FF01`. Current REVB returns only `{"cmd":"DI","val":"NHR-10"}`; its recognized advertising name permits legacy compatibility mode without a Canonical ID. Firmware supplying a Canonical ID (`NHR10-` plus 12 hexadecimal MAC digits) is verified, including the suffix for a default `NHR10-XXXXXX` name. The client does not read the blocklisted Serial Number `0x2A25`.
+7. The app marks the transport ready and reads the current Bluetooth name, RFID module information, battery, power, link profile, Q/session, query params, Tag Focus, region, and temperature. REVB does not supply an ESP32 controller firmware version; Diagnostics displays it as unknown rather than reusing the RFID module version.
 
 After connection, the app starts a heartbeat loop to verify that the device is still online. If the GATT link drops unexpectedly, the app invalidates the old GATT characteristics and makes five bounded reconnect attempts (0.5 s, 1 s, 2 s, 4 s, and 8 s delays) against the same browser-authorized device. Every successful reconnect rediscovers services/characteristics, re-enables notifications, revalidates identity through `DI`, and resynchronizes reader state. A user-requested disconnect never triggers automatic reconnect.
 
@@ -142,12 +142,12 @@ The Encode tab writes tag data:
 General flow:
 
 1. Enter the target EPC and/or the new data.
-2. Enter an access password if required by the tag. Default password is `00000000`.
+2. Use tags accepting access password `00000000`. Current REVB ignores custom passwords, so the UI does not offer one and the service rejects unsupported passwords locally.
 3. The app sends the write command through `FF01`.
 4. The reader returns a `WE` or `WD` response.
 5. If `status = ok`, the app reports success. If a `code` or error state is returned, the app reports failure.
 
-When integrating into another platform, validate hex strings before sending. For EPC memory bank writes, data length should be a multiple of 4 hex characters to match word boundaries.
+Validate complete 16-bit hexadecimal words before sending: target/new EPC at most 60 hex characters, WD data at most 124, word pointer 0–255. Reserved, EPC and User banks are writable; TID is read-only. The EPC editor uses WE and allows up to 60 hex characters.
 
 ### 3.5 Storage Tab
 
@@ -170,14 +170,17 @@ The Settings tab reads and writes reader configuration:
 
 | Setting | Read command | Set command | Notes |
 |---|---|---|---|
-| Bluetooth device name | `GDN` | `SDN` | Persistent GAP/advertising name, 1–14 UTF-8 bytes |
-| RF output power | `GP` | `SP` | dBm value |
-| RF link profile | `GLP` | `SLP` | Example profiles: 11/13/53 |
+| Bluetooth device name | `DI` | - | Read-only `val`, current name NHR-10 |
+| RF output power | `GP` | `SP` | Integer 0–30 dBm, persists on Apply |
+| RF link profile | `GLP` | `SLP` | U16; STD = 53 (Format 1), 15 (Format 2); QUICK = 11, DEEP = 13 |
+| Baseband preset | `GRP` | `SRP` | Profile/Q/session/target; status-only SRP ACK, then fresh GRP verification |
 | Q/session | `GQS` | `SQS` | EPC Gen2 singulation parameters |
-| Query timing | `GQP` | `SQP` | interval, dwell, append |
+| Query timing | `GQP` | `SQP` | Interval 0–60 ms in steps of 10; dwell 0 or 2–255; append 0–5 |
 | Tag Focus | `GTF` | `TF`, `STF` | `TF` sets runtime value, `STF` saves it |
-| Device popup (Diagnostics) | - | `POPUP` | Tests display on the reader |
-| Save config | - | `SAVE` | Saves configuration to flash |
+| Region | `GF` | `SF` | US/ETSI/VN; explicit `save` boolean and verified band/channel limits |
+| Device popup (Diagnostics) | - | `POPUP` | At most 15 UTF-8 bytes, without quotes, backslashes or control characters |
+
+There is no global configuration SAVE in REVB. `SAVE` notifications belong to batch inventory. See [REVB compatibility audit](docs/revb-transaction-compatibility.md) for transaction budgets and recovery behavior.
 
 ## 4. Code Architecture
 
@@ -227,9 +230,11 @@ Device selector:
 - Prefer the advertised custom service UUID and the new `namePrefix: "NHR10-"`; retain `NHR-10` and `Nextwaves` filters only for migration.
 - Always pass the custom service in `optionalServices` for the `acceptAllDevices` fallback. Do not request or read the blocklisted Device Information Serial Number `0x2A25` from a Web Bluetooth client.
 - If a runtime cannot parse the filters, fallback to `acceptAllDevices: true`, but still pass `optionalServices`.
-- Never use `BluetoothDevice.id`, an Android BLE address, or an iOS peripheral UUID as the business identity. Use the verified Canonical ID.
+- Use a verified Canonical ID as business identity when firmware supplies one. Current REVB has none; do not fabricate one from `BluetoothDevice.id` or a platform-specific BLE address.
 
 ### Device-initiated unpair
+
+This transport extension is retained for other firmware; current REVB does not implement UQ/UA.
 
 When `FF01` sends `{"cmd":"UQ","v":1}`, the transport treats it as an intentional unpair rather than link loss. It synchronously disables reconnect, cancels the reconnect delay and queued commands, clears persisted device/auto-connect keys, and immediately writes `{"cmd":"UA","v":1}` to `FF01` with response. The app does not close GATT before this ACK and waits for the peripheral to disconnect.
 
@@ -332,13 +337,14 @@ Main commands:
 
 | Command | Purpose |
 |---|---|
-| `DI` | Read immutable device identity and firmware info |
-| `GDN` / `SDN` | Get/set the persistent GAP and advertising device name |
-| `GRI` | Read firmware/info |
+| `DI` | Read current Bluetooth name; optional identity metadata on other firmware |
+| `GRI` | Read RFID module information/version and power |
 | `GB` | Read battery |
 | `GT` | Read temperature |
 | `GP` / `SP` | Get/set RF power |
 | `GLP` / `SLP` | Get/set link profile |
+| `GRP` / `SRP` | Get/set baseband preset tuple |
+| `GF` / `SF` | Get/set and optionally save Region |
 | `GQS` / `SQS` | Get/set Q and session |
 | `GQP` / `SQP` | Get/set query timing |
 | `GTF` / `TF` / `STF` | Get/set/save Tag Focus |
@@ -348,22 +354,15 @@ Main commands:
 | `WE` | Write EPC |
 | `WD` | Write memory bank |
 | `POPUP` | Show popup on reader |
-| `SAVE` | Save configuration |
+| `SAVE` (notification only) | Batch inventory save progress |
 
 ### 8.1 Bluetooth device name
 
-The Settings tab reads the configured name with `{"cmd":"GDN"}` and writes it
-with `{"cmd":"SDN","val":"HANDHELD KHO A"}`. The client accepts exactly
-1–14 UTF-8 bytes (excluding the firmware's trailing NUL), rejects malformed
-Unicode and C0/C1 control characters, and uses `JSON.stringify` so quotes and
-backslashes are escaped correctly.
-
-After an `SDN` acknowledgement, the client issues `GDN` again and treats that
-response as authoritative. Firmware is responsible for committing the value to
-NVS, applying it to both the GAP Device Name and advertising payload, and
-publishing it when advertising restarts after disconnect. `SDN` never changes
-the `DI` Canonical ID/MAC. Device discovery continues to work with arbitrary
-configured names because the primary picker filter uses the custom service UUID.
+The Settings tab sends `{"cmd":"DI"}` and displays the returned string `val`.
+Current REVB returns `NHR-10` and does not implement GDN/SDN or rename persistence.
+Read waits for a valid DI reply through the shared settings coordinator; reconnect
+clears the previous name and obtains a fresh value. Canonical identity metadata,
+when present on other firmware, remains separate from the displayed name.
 
 ## 9. Notification Protocol
 
@@ -532,7 +531,7 @@ The key point: the new app does not have to use Web Bluetooth. As long as it kee
 
 - If using Web Bluetooth, connect must be triggered by a user action.
 - Always include the custom service UUID in `optionalServices`; verify web identities through `DI` instead of the blocklisted `0x2A25` characteristic.
-- Validate the Canonical ID after connecting and after every automatic reconnect.
+- Validate Canonical ID after each connection when supplied; accept the current REVB NHR-10 legacy DI contract without claiming a verified unique identity.
 - Do not send parallel commands on the same characteristic.
 - Keep a small delay between command writes.
 - Do not run `interactive`, `batch`, and `locate` at the same time.
@@ -547,7 +546,7 @@ The key point: the new app does not have to use Web Bluetooth. As long as it kee
 
 - `bleService` is currently a singleton. If the new app must connect to multiple readers at the same time, refactor it into multiple instances.
 - `App.tsx` protects operation mode and routes callback data. Do not copy `useScanLogic` alone while dropping the callback guard.
-- `SettingsTab` currently has some buttons that call `bleService` directly. In a new app, settings commands can be moved into a dedicated controller for easier maintenance.
+- `SettingsTab`, initialization, refresh and scan presets share the response-aware `useSettingsActions` coordinator. Preserve that coordinator when porting to another platform.
 - `utils/nhrbParser.ts` is independent and should be kept nearly unchanged when porting.
 - BLE logic is optimized for one NHR-10/Nextwaves reader. If firmware changes commands or binary frames, update `bleService` first, then update UI logic.
 
@@ -560,12 +559,12 @@ The key point: the new app does not have to use Web Bluetooth. As long as it kee
 
 ## Controller feedback and targeted writes
 
-Device settings now wait for device replies and verify Apply by reading the value back. See [the inspected firmware contract and missing Region/Save handlers](docs/settings-firmware-contract.md) before relying on those features.
+Device settings wait for device replies and verify Apply by reading the value back. See [the current REVB settings contract](docs/settings-firmware-contract.md) and [Region contract](docs/region-firmware-contract.md).
 
 - Device activity occupies a fixed-height row. Pending commands disable conflicting controls without inserting inline notices or moving the page contents.
 - Find mode treats `F` with `rssi: -100` as the NHR-10 lost-target sentinel, not a measured signal. The available NHR-10 REVC firmware sends this after 2 seconds without a target read. A 2.5-second browser watchdog also clears a stale reading if that notification is missed. Waiting, detected, lost and stopped states remain separate; late packets for another EPC or a stopped session are ignored.
-- Write results appear in the shared dismissible notification: 4.2 seconds for a confirmation, 6.5 seconds for an error. Each write attempt has its own notification identity. Transport errors, a disconnect and a 10-second response timeout also produce a notice. All results remain in Diagnostics / the exported service report after the toast disappears.
-- Advanced memory write uses a single Target EPC input. When Scan tags has results, its arrow opens those EPCs directly; typing filters the list, and selecting an EPC closes it. With no scan results, the input remains available for manual entry without a dropdown. Selection fills the actual `epc` field sent with `WE` or `WD`; it does not alter the stored scan results. Those results are previous observations and are not a fresh presence check. Scan again after writing to verify the new data.
+- Write results appear in the shared dismissible notification: 4.2 seconds for a confirmation, 6.5 seconds for an error. Each write attempt has its own notification identity. Transport errors, a disconnect and an 11-second response timeout also produce a notice. An uncertain write requires a successful settings read before another RF operation. All results remain in Diagnostics / the exported service report after the toast disappears.
+- Advanced memory write selects Target EPC from scanned results. Selection fills the actual `epc` field sent with `WE` or `WD`; it does not alter the stored scan results. Those results are previous observations and are not a fresh presence check. Scan again after writing to verify the new data.
 - Quick EPC write sends an empty target EPC. The available firmware forwards this to the RFID module with a zero-length EPC selector; there is no firmware-side count check proving that exactly one physical tag is present. Do not assume that multiple tags must yield a failure. Isolate one tag for quick write, or select its EPC in Advanced memory write. Tags sharing an EPC still cannot be distinguished by an EPC-only selector.
 
 Validation: `npm run lint`, `npm test`, and `npm run build`. The development-only `/tests/ui.html` fixture provides command-wait, tag-lost and write-failure controls with simulated tags and continuous RX logs. It never connects to a reader and is not a production build entry point. Hardware write outcomes still require validation on the device and its installed firmware.

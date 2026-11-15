@@ -1,4 +1,6 @@
 import { ConnectionStatus } from '../types';
+import { MAX_LOCATE_EPC_HEX, validHexWords, validateRevbWrite, validPopupContent } from '../utils/revbProtocol';
+import { prepareSettingApply } from '../utils/settingsProtocol';
 import { assertProfileId } from '../utils/rfLinkProfile';
 import { prepareRegionApply } from '../utils/regionBand';
 
@@ -1099,12 +1101,12 @@ class BLEService {
   async getTagFocus() { return this.sendCommand({ cmd: 'GTF' }); }
   async getRegion() { return this.sendCommand({ cmd: 'GF' }); }
 
-  async setPower(dbm: number) { return this.sendCommand({ cmd: 'SP', val: dbm }); }
+  async setPower(dbm: number) { return this.sendCommand(prepareSettingApply({ id: 'power', mode: 'apply', value: dbm }).command); }
   
   // Baseband: Profile, Q, Session, Target
   async setBaseband(profile: number, q: number, session: number, target = 0) {
     assertProfileId(profile);
-    return this.sendCommand({ cmd: 'SRP', val: `${profile},${q},${session},${target}` });
+    return this.sendCommand(prepareSettingApply({ id: 'baseband', mode: 'apply', value: { profile, q, session, target } }).command);
   }
 
   // New specific setters based on firmware V12.0
@@ -1114,7 +1116,7 @@ class BLEService {
   }
 
   async setQSession(q: number, session: number) {
-    return this.sendCommand({ cmd: 'SQS', val: `${q},${session}` });
+    return this.sendCommand(prepareSettingApply({ id: 'q-session', mode: 'apply', value: { q, session } }).command);
   }
 
   async setQueryParam(intervalMs: number, dwellRaw: number, append: number) {
@@ -1122,8 +1124,8 @@ class BLEService {
     // Firmware handles conversion to module raw format:
     //   interval: ms value (e.g. 50 = 50ms, firmware divides by 10 -> raw 5)
     //   dwell:    raw count (e.g. 150, module interprets as 150*100ms = 15s)
-    //   append:   direct value (0-255)
-    return this.sendCommand({ cmd: 'SQP', val: `${intervalMs},${dwellRaw},${append}` });
+    //   append:   direct value (0-5)
+    return this.sendCommand(prepareSettingApply({ id: 'query-params', mode: 'apply', value: { interval: intervalMs, dwell: dwellRaw, append } }).command);
   }
 
   async setRegion(region: string, save: boolean) {
@@ -1162,22 +1164,28 @@ class BLEService {
   // async setMask(epc: string) { return this.sendCommand({ cmd: 'SMASK', epc }); }
   // async clearMask() { return this.sendCommand({ cmd: 'SMASK', epc: '' }); }
   
-  async locateTag(epc: string) { return this.sendCommand({ cmd: 'F', val: epc }); }
+  async locateTag(epc: string) {
+    if (!validHexWords(epc, MAX_LOCATE_EPC_HEX)) throw new Error('Locate EPC must contain complete hexadecimal words, up to 32 characters.');
+    return this.sendCommand({ cmd: 'F', val: epc });
+  }
 
   async showPopup(content: string, time: number, beep: boolean) {
-    const safeContent = content.substring(0, 15);
-    return this.sendCommand({ cmd: 'POPUP', content: safeContent, time, beep });
+    if (!validPopupContent(content)) throw new Error('Message must fit 15 UTF-8 bytes without quotes, backslashes or control characters.');
+    if (!Number.isInteger(time) || time < 100 || time > 10000) throw new Error('Popup duration must be 100–10000 ms.');
+    return this.sendCommand({ cmd: 'POPUP', content, time, beep });
   }
 
   async writeEpc(targetEpc: string, newEpc: string, password = "00000000") { 
+    validateRevbWrite(targetEpc, newEpc, 1, 1, password, true);
     return this.sendCommand({ cmd: 'WE', epc: targetEpc, new: newEpc, pwd: password }); 
   }
   
   async writeData(epc: string, mem: number, ptr: number, data: string, password = "00000000") {
+    validateRevbWrite(epc, data, mem, ptr, password);
     return this.sendCommand({ cmd: 'WD', epc, mem, ptr, data, pwd: password });
   }
 
-  async saveConfig() { return this.sendCommand({ cmd: 'SAVE' }); }
+  async saveConfig(): Promise<never> { throw new Error('NHR10-B has no global configuration SAVE. Apply settings individually or save Tag Focus with STF.'); }
 
   // Queue commands to ensure they are serialized
   async sendCommand(command: object): Promise<void> {

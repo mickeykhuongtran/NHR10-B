@@ -7,6 +7,7 @@ import { useScanLogic } from './hooks/useScanLogic';
 import { useLocateLogic } from './hooks/useLocateLogic';
 import { useFileTransfer } from './hooks/useFileTransfer';
 import { useSettingsActions } from './hooks/useSettingsActions';
+import { recoveryMessage, responseTimeoutMs } from './utils/revbProtocol';
 import { SettingsRequest } from './utils/settingsProtocol';
 import { parseProfileFormat, presetProfileId } from './utils/rfLinkProfile';
 
@@ -43,7 +44,13 @@ const App: React.FC = () => {
   const isBatchSaving = batchSaveInfo.state === 'saving';
   const settingsActions = useSettingsActions(connection.addLog, connection.status, undefined, connection.invalidateProfile, connection.updateRegionStatus);
 
-  const runOperation = async (action: () => Promise<void>) => {
+  useEffect(() => { connection.setConfigurationActive?.(settingsActions.activity !== null); }, [connection.setConfigurationActive, settingsActions.activity]);
+
+  const runOperation = async (action: () => Promise<void>, startsRf = false) => {
+    if (startsRf && settingsActions.isRfRecoveryRequired()) {
+      connection.addLog(recoveryMessage, 'error', { id: 'rfid-recovery', title: 'Reader recovery required' });
+      return;
+    }
     if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() || connection.status !== 'connected') return;
     commandPendingRef.current = true;
     setCommandPending(true);
@@ -68,16 +75,18 @@ const App: React.FC = () => {
   useEffect(() => {
     if (writeStatus !== 'pending') return;
     const timer = window.setTimeout(() => {
-      finishWrite('error', 'No write response received. Scan the tag to verify its data before retrying.');
-    }, 10000);
+      settingsActions.requireRfRecovery();
+      finishWrite('error', `No write response received. ${recoveryMessage} Then scan the tag to verify its data before retrying.`);
+    }, responseTimeoutMs('WE'));
     return () => window.clearTimeout(timer);
-  }, [writeStatus, finishWrite]);
+  }, [writeStatus, finishWrite, settingsActions.requireRfRecovery]);
 
   useEffect(() => {
     if (connection.status !== 'connected' && connection.status !== 'connecting' && writeStatus === 'pending') {
+      settingsActions.requireRfRecovery();
       finishWrite('error', 'Connection lost before write confirmation. Scan the tag to verify its data before retrying.');
     }
-  }, [connection.status, writeStatus, finishWrite]);
+  }, [connection.status, writeStatus, finishWrite, settingsActions.requireRfRecovery]);
 
   const clearBatchSavingTimer = useCallback(() => {
     if (batchSavingTimerRef.current !== null) {
@@ -271,6 +280,10 @@ const handleDataReceived = useCallback((data: any) => {
   };
 
   const writeTag = async (action: () => Promise<void>) => {
+    if (settingsActions.isRfRecoveryRequired()) {
+      connection.addLog(recoveryMessage, 'error', { id: 'rfid-recovery', title: 'Reader recovery required' });
+      return;
+    }
     if (pendingWriteRef.current !== null || commandPendingRef.current || settingsActions.isPending() || connection.status !== 'connected' || scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
     const attempt = ++writeAttemptRef.current;
     pendingWriteRef.current = attempt;
@@ -351,12 +364,12 @@ const handleDataReceived = useCallback((data: any) => {
       staleRemoveMs={scan.staleRemoveMs}
       onChangeRemoveStaleTags={scan.setRemoveStaleTags}
       onChangeStaleRemoveMs={scan.setStaleRemoveMs}
-      onStartScan={() => runOperation(scan.startScan)}
+      onStartScan={() => runOperation(scan.startScan, true)}
       onStopScan={() => runOperation(async () => {
         await scan.stopScan();
         locate.resetLocateState();
       })}
-      onStartBatch={() => runOperation(scan.startBatch)}
+      onStartBatch={() => runOperation(scan.startBatch, true)}
       onStopBatch={() => runOperation(async () => {
         markBatchSaving();
         await scan.stopScan();
@@ -364,7 +377,7 @@ const handleDataReceived = useCallback((data: any) => {
       })}
       onClearTags={scan.clearTags}
       
-      onLocate={(epc) => runOperation(() => locate.startLocate(epc))}
+      onLocate={(epc) => runOperation(() => locate.startLocate(epc), true)}
       onStopLocate={() => runOperation(locate.stopLocate)}
       targetRssi={locate.targetRssi}
       locateSignalState={locate.signalState}

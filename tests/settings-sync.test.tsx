@@ -73,3 +73,21 @@ it('stores profile and format together and invalidates cached data across connec
     expect(connection.settings).toMatchObject({ linkProfile: 5185, linkProfileFormat: 2, linkProfileConfirmed: true, qValue: 6, session: 255, target: 0 });
   } finally { act(() => root.unmount()); }
 });
+
+it('reads actual GRI.power and keeps module/controller firmware and missing temperature distinct', () => {
+  let connection!: ReturnType<typeof useRFIDConnection>;
+  function Harness() { connection = useRFIDConnection(); return null; }
+  const root = createRoot(document.createElement('div')); act(() => root.render(<Harness />));
+  try {
+    expect(connection.settings).toMatchObject({ version: '', readerVersion: '', temperature: null });
+    act(() => connection.handleDataReceived({ cmd: 'GRI', ver: '2.25', power: 24 }));
+    expect(connection.settings).toMatchObject({ version: '', readerVersion: '2.25', power: 24 });
+    act(() => connection.handleDataReceived({ cmd: 'GT', status: 'err', code: 'timeout' }));
+    expect(connection.settings.temperature).toBeNull();
+    act(() => connection.handleDataReceived({ cmd: 'GT', val: 0 }));
+    act(() => connection.handleDataReceived({ cmd: 'GT', status: 'err', val: 255 }));
+    expect(connection.settings.temperature).toBe(0);
+    act(() => connection.handleConnectionStatusChange('disconnected'));
+    expect(connection.settings).toMatchObject({ readerVersion: '', temperature: null });
+  } finally { act(() => root.unmount()); }
+});

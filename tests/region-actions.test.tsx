@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useSettingsActions } from '../hooks/useSettingsActions';
 import { useRFIDConnection } from '../hooks/useRFIDConnection';
 import { ConnectionStatus, RegionBandPreset } from '../types';
+import { responseTimeoutMs } from '../utils/revbProtocol';
 import { SettingsRequest } from '../utils/settingsProtocol';
 import { REGION_REPLIES, SUBSET_REPLY, UNKNOWN_REPLY } from './region-fixtures';
 
@@ -78,19 +79,18 @@ it('keeps UART error code and actual post-error subset; no SET retry or unrelate
   expect(connection.settings.regionBand).toMatchObject({ val: 'CUSTOM', mode: 'subset', minCh: 2, maxCh: 5 });
   expect(send.mock.calls.map(call => call[0].cmd)).toEqual(['GF', 'SF', 'GF']);
 });
-it('uses a five-second Apply deadline through the additional GF verification', async () => {
+it('allows the firmware multi-exchange SF budget and separately waits for a fresh GF', async () => {
   await read(); log.mockClear(); await apply();
-  await advance(4500); await receive(ack());
-  expect(send).toHaveBeenLastCalledWith({ cmd: 'GF' });
-  await advance(499); expect(log).not.toHaveBeenCalled();
-  await advance(1);
-  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'error', expect.objectContaining({ title: 'Apply not confirmed' }));
-  expect(connection.settings.regionBandConfirmed).toBe(false);
+  await advance(6500); expect(log).not.toHaveBeenCalled();
+  await receive(ack()); expect(send).toHaveBeenLastCalledWith({ cmd: 'GF' });
+  await advance(2100); expect(log).not.toHaveBeenCalled();
+  await receive(REGION_REPLIES.VN);
+  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'info', expect.objectContaining({ title: 'Đã lưu' }));
 });
 it('does not accept GLP, a value-only SF or a late saved ACK after timeout', async () => {
   await read(); log.mockClear(); await apply();
   await receive({ cmd: 'SF', val: 'VN' }); await receive({ cmd: 'GLP', val: 15, format: 2 });
-  await advance(4999); expect(log).not.toHaveBeenCalled();
+  await advance(responseTimeoutMs('SF') - 1); expect(log).not.toHaveBeenCalled();
   await advance(1); await receive(ack());
   expect(send.mock.calls.map(call => call[0].cmd)).toEqual(['GF', 'SF']);
   await advance(1000); await receive(REGION_REPLIES.VN);
@@ -98,24 +98,26 @@ it('does not accept GLP, a value-only SF or a late saved ACK after timeout', asy
 });
 it('requires a new recovery read before another configuration write after recovery failure', async () => {
   await read(); await apply(); await receive({ cmd: 'SF', status: 'err', error: 'region_mismatch' });
-  await advance(6000);
+  await advance(responseTimeoutMs('GF') + 1000);
   await start({ id: 'profile', mode: 'apply', value: 13 });
+  expect(send).toHaveBeenLastCalledWith({ cmd: 'GP' });
+  await receive({ cmd: 'GP', val: 20 });
   await advance(1000);
-  expect(send.mock.calls.map(call => call[0].cmd)).toEqual(['GF', 'SF', 'GF', 'GF']);
+  expect(send.mock.calls.map(call => call[0].cmd)).toEqual(['GF', 'SF', 'GF', 'GP', 'GF']);
   await receive(REGION_REPLIES.VN);
   expect(send).toHaveBeenLastCalledWith({ cmd: 'SLP', val: 13 });
 });
-it('handles legacy msg:busy by waiting for the active profile transaction before retrying SF', async () => {
+it('does not automatically repeat SF on busy or on another caller profile ACK', async () => {
   await read(); log.mockClear(); await apply();
   await receive({ cmd: 'SF', status: 'err', msg: 'busy' });
-  await advance(1500); expect(send).toHaveBeenCalledTimes(2);
   await receive({ cmd: 'SLP', status: 'ok', val: 13, format: 2, persisted: true });
-  expect(send.mock.calls.map(call => call[0].cmd)).toEqual(['GF', 'SF', 'SF']);
-  await receive(ack()); await receive(REGION_REPLIES.VN);
-  expect(log).toHaveBeenLastCalledWith(expect.any(String), 'info', expect.objectContaining({ title: 'Đã lưu' }));
+  await advance(30000);
+  expect(send.mock.calls.map(call => call[0].cmd)).toEqual(['GF', 'SF']);
+  expect(actions.isPending()).toBe(false);
+  expect(log.mock.calls.every(call => call[1] === 'error')).toBe(true);
 });
 it('marks initial GF timeout unavailable, suppresses automatic repeats and allows manual retry', async () => {
-  await start({ id: 'region-band', mode: 'read' }); await advance(5000);
+  await start({ id: 'region-band', mode: 'read' }); await advance(responseTimeoutMs('GF'));
   expect(connection.settings).toMatchObject({ regionBandConfirmed: false, regionBandSupport: 'unavailable' });
   await act(async () => { await actions.runSequence([{ id: 'region-band', mode: 'read' }], { silent: true }); });
   expect(send).toHaveBeenCalledOnce();

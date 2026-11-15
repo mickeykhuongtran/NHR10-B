@@ -3,6 +3,7 @@ import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { PageHeader } from './PageHeader';
 import { ScannedTagPicker } from './ScannedTagPicker';
+import { MAX_EPC_HEX, MAX_WRITE_DATA_HEX, validHexWords } from '../../utils/revbProtocol';
 import { Tag } from '../../types';
 
 interface OperationsTabProps {
@@ -13,33 +14,30 @@ interface OperationsTabProps {
   onWriteData: (epc: string, mem: number, ptr: number, data: string, password?: string) => void;
   writeStatus: 'idle' | 'pending' | 'success' | 'error';
 }
-const hexWords = (value: string) => /^[0-9A-F]+$/i.test(value) && value.length % 4 === 0;
-const validPassword = (value: string) => !value || /^[0-9A-F]{8}$/i.test(value);
+const hexWords = validHexWords;
 const normalize = (value: string) => value.replace(/\s/g, '').toUpperCase();
 
 export const OperationsTab: React.FC<OperationsTabProps> = ({ isConnected, isBusy, tags, onWriteEpc, onWriteData, writeStatus }) => {
   const [quickEpc, setQuickEpc] = useState('');
-  const [quickPwd, setQuickPwd] = useState('');
   const [targetEpc, setTargetEpc] = useState('');
   const [bank, setBank] = useState(1);
   const [pointer, setPointer] = useState('2');
   const [data, setData] = useState('');
-  const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState<'quick' | 'advanced' | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const locked = !isConnected || isBusy || writeStatus === 'pending';
-  const quickValid = hexWords(quickEpc) && validPassword(quickPwd);
-  const advancedValid = hexWords(targetEpc) && hexWords(data) && validPassword(password) && Number.isInteger(Number(pointer)) && Number(pointer) >= 0 && pointer !== '';
+  const quickValid = hexWords(quickEpc);
+  const advancedValid = hexWords(targetEpc) && hexWords(data, bank === 1 ? MAX_EPC_HEX : MAX_WRITE_DATA_HEX) && Number.isInteger(Number(pointer)) && Number(pointer) >= 0 && Number(pointer) <= 255 && pointer !== '';
   useEffect(() => {
     if (confirmation && !locked) dialogRef.current?.showModal();
     else { dialogRef.current?.close(); if (locked) setConfirmation(null); }
   }, [confirmation, locked]);
   const confirm = () => {
     if (locked) return;
-    if (confirmation === 'quick' && quickValid) onWriteEpc('', quickEpc, quickPwd || undefined);
+    if (confirmation === 'quick' && quickValid) onWriteEpc('', quickEpc, undefined);
     if (confirmation === 'advanced' && advancedValid) {
-      if (bank === 1) onWriteEpc(targetEpc, data, password || undefined);
-      else onWriteData(targetEpc, bank, Number(pointer), data, password || undefined);
+      if (bank === 1) onWriteEpc(targetEpc, data, undefined);
+      else onWriteData(targetEpc, bank, Number(pointer), data, undefined);
     }
     setConfirmation(null);
   };
@@ -50,8 +48,8 @@ export const OperationsTab: React.FC<OperationsTabProps> = ({ isConnected, isBus
       <div className="p-6 sm:p-7">
         <p className="eyebrow">New tag identifier</p>
         <div className="mt-5 space-y-5">
-          <Input label="New EPC (hexadecimal)" value={quickEpc} onChange={e => setQuickEpc(normalize(e.target.value))} placeholder="E.g. E20000112233445566778899" className="font-mono" disabled={writeStatus === 'pending'} error={quickEpc && !hexWords(quickEpc) ? 'Enter hexadecimal data in groups of 4 characters.' : undefined} />
-          <details><summary className="text-sm text-slate-500">Access password (optional)</summary><div className="mt-3"><Input label="8-character hexadecimal password" value={quickPwd} onChange={e => setQuickPwd(normalize(e.target.value))} placeholder="00000000" maxLength={8} className="font-mono" error={!validPassword(quickPwd) ? 'The password must contain exactly 8 hexadecimal characters.' : undefined} /></div></details>
+          <Input label="New EPC (hexadecimal)" value={quickEpc} onChange={e => setQuickEpc(normalize(e.target.value))} placeholder="E.g. E20000112233445566778899" className="font-mono" disabled={writeStatus === 'pending'} error={quickEpc && !hexWords(quickEpc) ? 'Use complete hexadecimal words, up to 60 characters.' : undefined} />
+          <p className="text-xs leading-5 text-slate-500">This firmware uses access password 00000000. Custom access passwords are not supported. New EPC: up to 60 hexadecimal characters in complete 16-bit words.</p>
           <Button disabled={locked || !quickValid} onClick={() => setConfirmation('quick')}>Review & write EPC</Button>
         </div>
       </div>
@@ -67,11 +65,11 @@ export const OperationsTab: React.FC<OperationsTabProps> = ({ isConnected, isBus
         <ScannedTagPicker tags={tags} selectedEpc={targetEpc} onSelect={setTargetEpc} disabled={writeStatus === 'pending'} />
         <p className="text-xs leading-5 text-slate-500">Select a target captured in Scan tags. Manual EPC entry is disabled to prevent targeting an unobserved tag. If two physical tags share the same EPC, isolate the intended tag before writing.</p>
         <div className="grid gap-4 sm:grid-cols-3">
-          <div><label htmlFor="memory-bank" className="mb-2 block text-sm font-medium text-slate-600">Memory bank</label><select id="memory-bank" className="h-[42px] w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" value={bank} onChange={e => setBank(Number(e.target.value))}><option value={1}>EPC (1)</option><option value={3}>User (3)</option><option value={0}>Reserved (0)</option><option value={2}>TID (2)</option></select></div>
-          <Input label="Word pointer" type="number" min={0} value={bank === 1 ? '2' : pointer} onChange={e => setPointer(e.target.value)} disabled={bank === 1} />
-          <Input label="Access password (optional)" placeholder="00000000" maxLength={8} value={password} onChange={e => setPassword(normalize(e.target.value))} error={!validPassword(password) ? 'Use 8 hexadecimal characters.' : undefined} />
+          <div><label htmlFor="memory-bank" className="mb-2 block text-sm font-medium text-slate-600">Memory bank</label><select id="memory-bank" className="h-[42px] w-full rounded-lg border border-slate-200 bg-white px-3 text-sm" value={bank} onChange={e => setBank(Number(e.target.value))}><option value={1}>EPC (1)</option><option value={3}>User (3)</option><option value={0}>Reserved (0)</option></select></div>
+          <Input label="Word pointer" type="number" min={0} max={255} value={bank === 1 ? '2' : pointer} onChange={e => setPointer(e.target.value)} disabled={bank === 1} />
+
         </div>
-        <Input label={bank === 1 ? 'New EPC (hexadecimal)' : 'Data (hexadecimal words)'} value={data} onChange={e => setData(normalize(e.target.value))} className="font-mono" placeholder="AABBCCDD…" error={data && !hexWords(data) ? 'Use hexadecimal data in groups of 4 characters.' : undefined} />
+        <Input label={bank === 1 ? 'New EPC (hexadecimal)' : 'Data (hexadecimal words)'} value={data} onChange={e => setData(normalize(e.target.value))} className="font-mono" placeholder="AABBCCDD…" error={data && !hexWords(data, bank === 1 ? MAX_EPC_HEX : MAX_WRITE_DATA_HEX) ? `Use complete hexadecimal words, up to ${bank === 1 ? MAX_EPC_HEX : MAX_WRITE_DATA_HEX} characters.` : undefined} />
         <Button variant="outline" disabled={locked || !advancedValid} onClick={() => setConfirmation('advanced')}>Review memory write</Button>
       </fieldset>
     </details>

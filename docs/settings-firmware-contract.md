@@ -1,16 +1,18 @@
-# Device settings: frontend fixes and firmware response contract
+# Device settings: current NHR10-B contract
 
-RF Link Profile, Region and Bluetooth name contracts updated on 2026-09-11 from the device owner’s NHR-10 REVB specifications. See [Region integration](region-firmware-contract.md) for the implemented GF/SF behavior. This update changes only the web controller. Observations in the historical support section below come from the previous investigation of `D:/Firmware-Develop/NHR-10-REVC` (firmware 2.8); they have not been reverified against the new REVB firmware.
+Updated 2026-11-15 against `D:/Firmware-Develop/NHR-10-REVB/components/ble_service/ble_command_protocol.c` and `components/rfid_module/` on `dev/adaptiveVerC-to-VerB`, including its transaction-layer integration. This web update preserves REVB U16/V2.25 profile formats and frequency plans. See [Region integration](region-firmware-contract.md) and [compatibility audit](revb-transaction-compatibility.md).
 
-## Fixed in the web controller
+## Response-aware coordination
 
-- Read/Apply buttons now have stable React component identities. BLE telemetry no longer remounts them and drops keyboard focus. Pending feedback occupies reserved space; it does not insert a banner or dim the entire settings form.
-- A completed GATT write is only command delivery. Read waits for a valid reply. Apply waits for an acknowledgement, requests the corresponding GET, and compares the reported value with the submitted value. Each user operation emits one auto-dismiss notice and a retained diagnostic log.
-- RF Profile SET acknowledgement timeout is 4 seconds; GET timeout is 5 seconds. Region Apply has a separate 5-second budget including SF acknowledgement and the web’s GF verification. SLP/SRP require the original SET command, `status: "ok"`, `persisted: true`, and a matching returned value before reporting “Đã lưu”. The web also reads GLP/GRP back and requires a match. A GLP/GRP response alone never proves persistence. Non-profile settings retain their existing read-back compatibility behavior.
-- Connection initialization, Diagnostics refresh, Settings Apply and Scan presets use the same response-aware coordinator. Configuration requests are sequential through their replies, not merely through GATT writes. Busy responses wait for a previous configuration completion, or a full operation timeout when no completion event arrives, then retry at most twice. Disconnect/unmount cancels pending work. Scanning, tag writes and further settings commands cannot overlap a pending transaction.
-- A status-only TF/STF acknowledgement no longer gets parsed as OFF. Only a valid `val: 0` or `val: 1` changes the displayed Tag Focus state.
+Read waits for a valid reply. Apply waits for the originating SET acknowledgement, requests a fresh corresponding GET, and compares the reported value with the submitted value. GATT completion is delivery only. A missing SET acknowledgement never becomes a successful Apply based only on a GET. Settings buttons retain stable React identities, keyboard focus and reserved feedback space.
 
-## RF Link Profile: current REVB contract
+Initialization, Diagnostics refresh, Settings and scan presets share one coordinator through their terminal replies. Scan, Locate, writes and other settings cannot start during a pending configuration operation. Busy fails with an instruction to stop the active RF operation; the app never automatically repeats a SET. Disconnect and unmount cancel pending work. Unrelated LCD SET replies cannot finish or fail a GET.
+
+Firmware permits 2 seconds per UART exchange and holds its mutex across complete multi-exchange transactions. Browser response budgets allow 8 seconds for an already running LCD/startup transaction plus 1 second for BLE delivery: ordinary GET/SET 11 s, GLP 13 s, GRP 15 s, SLP 17 s, SRP 19 s, SF 15 s. SF plus fresh GF allows at most 26 s. These are bounded browser budgets, not a guarantee of admission under continuous competing LCD work.
+
+Periodic GT polling and the false-offline heartbeat check pause during configuration. Battery polling, stale marking and battery protection remain active. An RFID timeout, transport error or uncertain GATT delivery requires a successful fresh UART GET before another configuration write or RF start. DI does not clear recovery because it never accesses the RFID UART. Reconnecting BLE alone does not reset firmware quarantine. If a fresh read still fails, restart the reader module and controller together. No SET is retried automatically.
+
+## RF Link Profile and baseband
 
 | Product preset | Format 1 ID | Format 2 ID |
 |---|---:|---:|
@@ -18,69 +20,58 @@ RF Link Profile, Region and Bluetooth name contracts updated on 2026-09-11 from 
 | QUICK — 640 kHz / FM0 | 11 | 11 |
 | DEEP — 160 kHz / Miller 8 | 13 | 13 |
 
-Use only the firmware `format` field to choose the preset table. Missing or unrecognized format is unknown; no preset mapping is inferred from profile ID. The current raw ID remains visible and can be reapplied after a fresh read, but presets are unavailable until the format is known. IDs are unsigned 16-bit integers, `0…65535`, with no masking or truncation. Unsupported IDs are for the module to reject. These three presets are not a catalog of every supported module profile.
+Only the firmware `format` field selects the preset table. Missing or unrecognized format stays unknown; no format is inferred from profile ID. The raw ID remains visible and can be reapplied after a fresh read. IDs are unsigned 16-bit integers, 0–65535, without truncation. Unsupported IDs are for the module to reject; presets are not an exhaustive catalog.
 
 ```json
 {"cmd":"GLP"}
 {"cmd":"GLP","val":15,"format":2}
 {"cmd":"SLP","val":13}
 {"cmd":"SLP","status":"ok","val":13,"format":2,"persisted":true}
-{"cmd":"SLP","status":"err","error":"persist_failed"}
-{"cmd":"GRP","val":"5185,6,255,0","format":2}
+{"cmd":"SRP","val":"15,4,1,0"}
+{"cmd":"GLP","val":15,"format":2}
+{"cmd":"SRP","status":"ok"}
+{"cmd":"GRP"}
+{"cmd":"GRP","val":"15,4,1,0","format":2}
 ```
 
-GRP/SRP use `profile,Q,session,target`; session `255` means Auto. Scan presets send SRP using the table above, await its saved ACK, verify GRP, then apply and verify Tag Focus. The entire sequence holds the configuration lock. The SRP saved ACK must echo the requested tuple in `val`, with `status: "ok"` and `persisted: true`.
+SLP requires its matching saved ACK with `persisted: true`, then matching GLP. SRP uses `profile,Q,session,target`, with session 255 meaning Auto. The current firmware sends a preceding GLP profile update and a status-only SRP success after profile persistence and Q/session acknowledgement. The web accepts that SRP ACK and requires a fresh matching GRP; it rejects an explicitly conflicting echoed tuple or `persisted: false`. A preceding GLP cannot finish SRP, and GRP alone cannot replace its ACK. SRP UI feedback is “Applied and verified”; no missing persistence field is invented.
 
-After SLP/SRP failure, mismatched/incomplete acknowledgement, transport failure or timeout, read GLP/GRP before releasing the transaction. `persist_failed` or Q/Session failure can leave an already changed profile. If recovery itself fails, the profile remains unconfirmed and the next configuration write must first complete a recovery read. Read-back recovery never creates a success notice for the failed write.
+Scan presets verify SRP/GRP before TF/GTF and hold the coordinator through both operations. After profile/baseband failure, a recovery GLP/GRP confirms actual state; the failed write remains failed. If recovery fails, the next configuration write must complete a recovery read first. Every reconnect requests fresh GLP, clears the previous format and leaves cached profiles unconfirmed until read. Read-back confirms current state, not retention through a power cycle.
 
-Every connection/reconnection starts a new GLP read. Cached IDs are shown as unconfirmed until a current valid response arrives; the previous format is cleared. A read confirms current state, not survival through a power cycle.
+## Other configuration commands
 
-### Hardware acceptance (still required)
+| Setting | GET | SET | Validation / persistence |
+|---|---|---|---|
+| RF power | GP | SP | Integer 0–30 dBm; persists on Apply |
+| Q/session | GQS | SQS | Q 0–15; session 0–3 or 255; persists on Apply |
+| Query parameters | GQP | SQP | Interval 0–60 ms, multiples of 10; dwell 0 (module default) or 2–255; append 0–5; persists on Apply |
+| Tag Focus | GTF | TF / STF | TF temporary; explicit Save uses STF |
+| Region | GF | SF | US/ETSI/VN; explicit save flag; see Region contract |
 
-1. With Format 2, apply STD, QUICK and DEEP and inspect TX IDs `15`, `11`, `13`; with Format 1, STD must send `53`.
-2. For each chosen profile, wait for the matching saved ACK and successful GLP read-back, power the device fully off/on, reconnect and inspect the newly received GLP. Its ID and format must match the expected device configuration.
-3. Exercise missing ACK, mismatched value, missing/false `persisted`, `status: "err"`, `persist_failed`, busy, and disconnect during Apply. None may generate a saved notice without the required ACK; recovery must show actual state.
-4. Return custom IDs such as `5185` and `65535`, then Apply unchanged. Confirm exact TX IDs with no truncation. Return a profile without `format` and confirm unknown format and no STD mapping.
-5. Force SRP failure at Q/Session. Confirm GRP recovery before another configuration write and no subsequent Tag Focus command from the failed preset sequence.
+SET success can be status-only, so it never overwrites a current value with a default. In particular, TF/STF without `val` cannot mean OFF. Both TF and STF require their own ACK and matching GTF. GET errors use the originating command; GCFG remains a legacy error alias only for extended-parameter reads. A batch SAVE notification cannot acknowledge settings. There is no global configuration SAVE button or supported SAVE request.
 
-Automated tests simulate these reply paths and connection changes. They do not verify real RF behavior, flash writes or physical power-cycle retention.
+## Bluetooth name and diagnostics
 
-## Bluetooth name: current REVB contract
-
-The name is read-only. Device settings shows the current name and a Read button; the rename input and Apply button have been removed. The web sends `DI` and displays its string `val` directly, without preferring a cached browser advertising name or substituting a compact identity label.
+The Bluetooth name is read-only. Settings sends DI and displays its string `val` directly:
 
 ```json
 {"cmd":"DI"}
 {"cmd":"DI","val":"NHR-10"}
 ```
 
-Confirmed against `D:/Firmware-Develop/NHR-10-REVB-FINAL/components/ble_service/ble_command_protocol.c`: DI returns `BLE_DEVICE_NAME` in `val`. The web retains optional canonical identity metadata separately for firmware that supplies it. Bluetooth name reads use the existing sequential settings coordinator and 5-second GET timeout; missing/invalid values or error replies cannot report Read successful. The name is cleared when the link is lost, and each connection/reconnection requests a fresh DI. Diagnostics refresh also reads DI through the coordinator.
+Current REVB supplies no Canonical ID or ESP32 firmware version. The transport accepts this DI reply for the recognized NHR-10 advertising family; optional canonical metadata on other firmware retains its validation. DI uses an 11-second browser budget and is refreshed on reconnect. GDN/SDN and name Apply are unsupported and rejected locally.
 
-The web no longer sends GDN/SDN or handles old rename acknowledgements as saved. The read-only name has no former 14-byte rename limit. Device settings request types exclude name Apply, and the command builder also rejects stale Apply callers at runtime.
+GRI `ver` is the RFID module version, separate from the controller firmware field; `power` updates RF power. Failed GT without a valid numeric value leaves temperature unknown instead of manufacturing 0 °C. POPUP content is limited to 15 UTF-8 bytes without quotes, backslashes or control characters, matching the firmware string parser.
 
-## Historical non-profile firmware support
+## Validation and hardware acceptance
 
-| Setting | Read request / successful reply | Apply request / current acknowledgement |
-|---|---|---|
-| RF power | `GP` → `GP` with numeric `val` | `SP` → `SP`, `status: ok` (sometimes includes `val`) |
-| Q / Session | `GQS` → `GQS` with `q`, `session` | `SQS` → `SQS`, `status: ok` |
-| Query parameters | `GQP` → `GQP` with `interval` in ms, `dwell`, `times` | `SQP` → `SQP`, `status: ok` |
-| Tag Focus | `GTF` → `GTF` with `val: 0/1` | `TF` → `TF`, `status: ok`, without a value |
+Automated tests exercise actual SRP status-only replies, strict SLP persistence acknowledgements, Format 1/2 and raw U16 IDs, STF, query limits, busy/timeout/error paths, late replies, disconnects, quarantine recovery, Region verification, battery polling and RF operation locking. The development-only browser fixture simulates responses; it does not connect to a reader.
 
-In the previously inspected firmware, the GET extended-parameter error response is `GCFG`, not the originating `GQS/GQP/GTF`. The frontend accepts this error during its serialized extended-parameter transaction. The corresponding firmware handlers are in `components/ble_service/ble_command_protocol.c` and `components/rfid_module/rfid_module.c`.
+Hardware checks still required:
 
-In that historical inspection, Q/Session and Query Parameter setters saved to module flash, while TF applied a temporary setting and STF saved Tag Focus. The web does not infer RF profile persistence from these older observations; the current REVB contract above governs SLP/SRP.
+1. Apply STD/QUICK/DEEP on the installed module; confirm Format 1 STD sends 53 and Format 2 STD sends 15.
+2. Apply saved power/profile/Q/query/Tag Focus/Region, power off both module and controller, reconnect and compare fresh reads. Temporary TF and SF must follow their documented retention behavior.
+3. Exercise concurrent LCD activity, externally started scan, missing reply, partial SET failure and disconnect. No incomplete operation may display a saved result or trigger an automatic repeated SET.
+4. Verify RF performance and successful tag writes on hardware. A successful UART acknowledgement does not replace RF or power-cycle testing.
 
-## Region integration and configuration SAVE
-
-The current REVB firmware implements GF/SF. The previous Region proposal is superseded by [the current Region contract](region-firmware-contract.md): only US/ETSI/VN, explicit band/channel verification, and `saved`/`verified` flags. JP, KOR, Custom writes and `space_125khz` are not part of this web API.
-
-The older dispatcher inspection did not implement a global configuration `SAVE`; its `SAVE` notifications described batch inventory progress. The new Region note does not establish support for a global configuration save. The web continues to require a separate non-batch `SAVE`, `status: "ok"` reply for that existing button. Region saving uses `SF` with the JSON boolean `save`, not the global SAVE command or ESP32 NVS.
-
-## Recommended protocol improvements
-
-1. Give SET replies their original command name (`SLP`, not `GLP`), explicit success/error status and the effective value. Return the originating GET name on errors instead of the generic GCFG. Queue module transactions through their responses rather than relying only on the mutable `last_get_cfg_no` / `last_set_extended_cmd` globals.
-2. Add a request identifier, echoed unchanged in the terminal reply. This requires a matching frontend update: the current implementation correlates by command and permits one user settings transaction at a time. Identifiers distinguish late replies from a retried request for the same command.
-3. Advertise supported commands and persistence semantics in a capability response so the UI can disable unavailable features without guessing from the firmware version string.
-
-Validation should include module rejection, invalid input, missing response, a read-back different from the requested value, disconnect during Apply, repeated reads, persistence failure, and batch SAVE notifications interleaved with configuration handling. UI tests use simulated replies; RF operation and persistence across a power cycle require hardware verification.
+Firmware currently has no request identifiers echoed over BLE. The web correlates by command and serializes its operations. Same-command unsolicited LCD replies or old replies arriving during a new identical read cannot be distinguished perfectly; exact correlation requires an end-to-end firmware request-ID/capability extension.

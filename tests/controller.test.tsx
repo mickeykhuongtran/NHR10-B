@@ -68,6 +68,17 @@ it('shows the current Bluetooth name with a Read button and no rename controls',
   expect(props.onSettingsAction).toHaveBeenCalledOnce();
 });
 
+it('offers STF saving instead of global SAVE and displays query default/append bounds accurately', () => {
+  const props = fixture(); props.status = 'connected';
+  props.settings.scanParams = { interval: 30, dwell: 0, count: 5, append: 5 };
+  render(<DashboardLayout {...props} />); click('Advanced'); click('Device settings');
+  expect(buttons().some(b => b.textContent === 'Save configuration')).toBe(false);
+  click('Save Tag Focus');
+  expect(props.onSettingsAction).toHaveBeenCalledWith({ id: 'tag-focus', mode: 'apply', value: true, persist: true });
+  expect(container.querySelector<HTMLSelectElement>('#setting-dwell')?.value).toBe('0');
+  expect(container.querySelector<HTMLSelectElement>('#setting-append')?.value).toBe('5');
+});
+
 it('starts with the EPC inventory focused and keeps optional guidance and engineering tools collapsed', () => {
   render(<DashboardLayout {...fixture()} />);
   expect(container.querySelector('h1')?.textContent).toBe('Scan tags');
@@ -229,7 +240,7 @@ it('explains every RF preset before applying one and retains its command mapping
   expect(container.textContent).toContain('Profile 11, Q2, S0, Tag Focus off');
 });
 
-it('sends the chosen target, memory bank, pointer and password for advanced data writes', () => {
+it('sends the chosen target, writable bank and bounded pointer with the firmware default password', () => {
   const tag = { epc: 'E20000112233445566778899', timestamp: 100, count: 4 };
   const props = { isConnected: true, isBusy: false, tags: [tag], onWriteEpc: vi.fn(), onWriteData: vi.fn(), writeStatus: 'idle' as const };
   render(<OperationsTab {...props} />);
@@ -237,9 +248,9 @@ it('sends the chosen target, memory bank, pointer and password for advanced data
   act(() => container.querySelector<HTMLElement>('[role="option"]')!.click());
   const bank = container.querySelector<HTMLSelectElement>('#memory-bank')!;
   act(() => { bank.value = '3'; bank.dispatchEvent(new Event('change', { bubbles: true })); });
-  fill(input('Word pointer'), '4'); fill(input('Access password (optional)'), '11223344'); fill(input('Data (hexadecimal words)'), 'AABBCCDD');
+  fill(input('Word pointer'), '4'); expect(container.querySelector('input[placeholder="00000000"]')).toBeNull(); fill(input('Data (hexadecimal words)'), 'AABBCCDD');
   click('Review memory write'); click('Confirm write');
-  expect(props.onWriteData).toHaveBeenCalledWith(tag.epc, 3, 4, 'AABBCCDD', '11223344');
+  expect(props.onWriteData).toHaveBeenCalledWith(tag.epc, 3, 4, 'AABBCCDD', undefined);
   expect(props.onWriteEpc).not.toHaveBeenCalled();
 });
 

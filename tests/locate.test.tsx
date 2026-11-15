@@ -18,6 +18,13 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => root.unmount()); vi.useRealTimers(); });
 
+it('rejects EPCs exceeding the firmware find-event buffer before starting a session', async () => {
+  await act(async () => locate.startLocate('ABCD'.repeat(9)));
+  expect(ble.locateTag).not.toHaveBeenCalled();
+  expect(locate.isLocating).toBe(false);
+  expect(log).toHaveBeenLastCalledWith(expect.stringContaining('up to 32'), 'error');
+});
+
 it('maps the firmware -100 sentinel to lost and recovers on the next target read', async () => {
   await act(async () => locate.startLocate(epc));
   expect(locate.signalState).toBe('waiting');

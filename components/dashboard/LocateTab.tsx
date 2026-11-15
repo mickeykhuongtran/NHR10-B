@@ -3,6 +3,7 @@ import { Button } from '../ui/Button';
 import { Input } from '../ui/Input';
 import { PageHeader } from './PageHeader';
 import { Tag, LocateSignalState } from '../../types';
+import { MAX_LOCATE_EPC_HEX, validHexWords } from '../../utils/revbProtocol';
 
 interface LocateTabProps {
   isConnected: boolean;
@@ -19,7 +20,7 @@ interface LocateTabProps {
 
 export const LocateTab: React.FC<LocateTabProps> = ({ isConnected, isBusy, tags, onLocate, onStopLocate, targetRssi, signalState, isLocating, targetEpc, setTargetEpc }) => {
   const [pending, setPending] = useState(false);
-  const valid = /^[0-9a-f]+$/i.test(targetEpc) && targetEpc.length % 4 === 0;
+  const valid = validHexWords(targetEpc, MAX_LOCATE_EPC_HEX);
   const detected = isLocating && signalState === 'detected' && targetRssi !== null;
   const lost = isLocating && signalState === 'lost';
   const level = !detected ? 0 : Math.max(0, Math.min(100, targetRssi < 0 ? (110 - Math.abs(targetRssi)) * 2 : (targetRssi - 60) * 2));
@@ -34,7 +35,7 @@ export const LocateTab: React.FC<LocateTabProps> = ({ isConnected, isBusy, tags,
       <section className="rounded-xl border border-slate-200 bg-white p-6">
         <p className="eyebrow">01 · Select a tag</p>
         <div className="mt-5">
-          <Input label="Target EPC" list="scanned-epcs" placeholder="Enter or select a scanned EPC" value={targetEpc} onChange={e => setTargetEpc(e.target.value.replace(/\s/g, '').toUpperCase())} disabled={isLocating} className="font-mono" error={targetEpc && !valid ? 'Use hexadecimal characters in complete 16-bit words (4 characters).' : undefined} />
+          <Input label="Target EPC" list="scanned-epcs" placeholder="Enter or select a scanned EPC" value={targetEpc} onChange={e => setTargetEpc(e.target.value.replace(/\s/g, '').toUpperCase())} disabled={isLocating} className="font-mono" error={targetEpc && !valid ? 'Use complete hexadecimal words, up to 32 characters for this reader.' : undefined} />
           <datalist id="scanned-epcs">{tags.map(tag => <option key={tag.epc} value={tag.epc} />)}</datalist>
           <p className="mt-3 text-sm leading-6 text-slate-500">Use Find tag from scan results to fill this field automatically.</p>
         </div>

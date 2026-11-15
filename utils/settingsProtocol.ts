@@ -13,8 +13,8 @@ export interface SettingValues {
 }
 export type SettingId = keyof SettingValues | 'device-name';
 export type SettingsRequest = { id: SettingId; mode: 'read' }
-  | { [K in keyof SettingValues]: { id: K; mode: 'apply'; value: SettingValues[K] } }[keyof SettingValues]
-  | { id: 'config'; mode: 'save' };
+  | { [K in Exclude<keyof SettingValues, 'tag-focus'>]: { id: K; mode: 'apply'; value: SettingValues[K] } }[Exclude<keyof SettingValues, 'tag-focus'>]
+  | { id: 'tag-focus'; mode: 'apply'; value: boolean; persist?: boolean };
 export type SettingReading = Record<string, string | number | boolean | null>;
 export type DeviceCommand = { cmd: string; [key: string]: unknown };
 export const SETTING_META: Record<SettingId, { title: string; get: string; set?: string; setReplies: string[] }> = {
@@ -94,7 +94,9 @@ export function prepareSettingApply(request: Extract<SettingsRequest, { mode: 'a
   const cmd = SETTING_META[request.id].set;
   if (!cmd) throw new Error('This setting is read-only.');
   switch (request.id) {
-    case 'power': return { command: { cmd, val: request.value }, expected: { val: request.value } };
+    case 'power':
+      if (typeof request.value !== 'number' || integer(request.value, 0, 30) === null) throw new Error('RF power must be an integer from 0 to 30 dBm.');
+      return { command: { cmd, val: request.value }, expected: { val: request.value } };
     case 'profile': assertProfileId(request.value); return { command: { cmd, val: request.value }, expected: { val: request.value } };
     case 'baseband': {
       const { profile, q, session, target } = request.value;
@@ -102,9 +104,17 @@ export function prepareSettingApply(request: Extract<SettingsRequest, { mode: 'a
       if (integer(q, 0, 15) === null || ![0, 1, 2, 3, 255].includes(session) || ![0, 1].includes(target)) throw new Error('Invalid Q, session or target.');
       return { command: { cmd, val: `${profile},${q},${session},${target}` }, expected: request.value };
     }
-    case 'tag-focus': return { command: { cmd, val: request.value ? 1 : 0 }, expected: { val: request.value ? 1 : 0 } };
-    case 'q-session': return { command: { cmd, val: `${request.value.q},${request.value.session}` }, expected: request.value };
-    case 'query-params': return { command: { cmd, val: `${request.value.interval},${request.value.dwell},${request.value.append}` }, expected: request.value };
+    case 'tag-focus':
+      if (typeof request.value !== 'boolean' || (request.persist !== undefined && typeof request.persist !== 'boolean')) throw new Error('Tag Focus value and persistence must be booleans.');
+      return { command: { cmd: request.persist ? 'STF' : 'TF', val: request.value ? 1 : 0 }, expected: { val: request.value ? 1 : 0 } };
+    case 'q-session':
+      if (integer(request.value.q, 0, 15) === null || ![0, 1, 2, 3, 255].includes(request.value.session)) throw new Error('Invalid Q or session.');
+      return { command: { cmd, val: `${request.value.q},${request.value.session}` }, expected: request.value };
+    case 'query-params': {
+      const { interval, dwell, append } = request.value;
+      if (integer(interval, 0, 60) === null || interval % 10 || integer(dwell, 0, 255) === null || dwell === 1 || integer(append, 0, 5) === null) throw new Error('Query parameters require interval 0–60 ms in 10 ms steps, dwell 0 or 2–255, append 0–5.');
+      return { command: { cmd, val: `${interval},${dwell},${append}` }, expected: request.value };
+    }
     case 'region-band': {
       return prepareRegionApply(request.value.selection, request.value.save);
     }

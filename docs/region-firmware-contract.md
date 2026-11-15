@@ -1,6 +1,6 @@
 # Region: NHR-10 REVB web integration
 
-Updated 2026-09-11 from the owner-provided firmware note `D:/Firmware-Develop/NHR-10-REVB-FINAL/docs/web-region-update-note.vi.md`. This is an integration contract, not a hardware qualification or regulatory compliance report. Firmware flashing is outside this web update.
+Updated 2026-11-15 against `D:/Firmware-Develop/NHR-10-REVB` transaction-enabled firmware and its REVB Region implementation. This is an integration contract, not a hardware qualification or regulatory compliance report. Firmware flashing is outside this web update.
 
 ## Product presets
 
@@ -32,19 +32,19 @@ Initial GF timeout/unsupported replies leave Apply and Save disabled with an una
 {"cmd":"SF","status":"ok","val":"VN","band":27,"min_ch":0,"max_ch":7,"saved":true,"verified":true}
 ```
 
-The web transmits only the preset code and a required JSON boolean `save`. Firmware owns the preflight GET, UART payload, module SET and verification. The web requires an SF success ACK with matching code/band/min/max, `verified: true`, and `saved` exactly equal to the requested boolean. It then issues GF and compares actual band/min/max again. The accepted SF attempt and this additional GF share a 5-second deadline; a standalone Read allows 5 seconds.
+The web transmits only the preset code and a required JSON boolean `save`. Firmware owns the preflight GET, UART payload, module SET and verification. The web requires an SF success ACK with matching code/band/min/max, `verified: true`, and `saved` exactly equal to the requested boolean. It then issues GF and compares actual band/min/max again. SF acknowledgement allows 15 seconds and the fresh GF allows up to 11 seconds, within a 26-second overall deadline. A standalone GF allows 11 seconds. These browser budgets include a competing LCD/startup transaction and BLE delivery margin on top of the firmware’s 2 seconds per UART exchange.
 
 - `save: true` with matching confirmation: **Đã lưu**.
 - `save: false` with matching confirmation: **Đã áp dụng tạm thời**.
 - A successful BLE write, missing saved/verified fields, wrong limits, timeout or error cannot produce either success notice. GF alone cannot prove saving.
 
-Region and RF Profile transactions share the same lock. Controls are disabled during scan. Busy replies, including legacy `msg: "busy"`, wait for the current configuration completion or a bounded timeout before retrying. After a Region error, wait at least one second before another GF/SF. A failed SF is not automatically repeated; read GF to recover actual state. If recovery fails, the next configuration write must first complete a recovery read. Retain the original failure in the log and mark cached state unconfirmed. A late/unsolicited SF/GF cannot confirm a timed-out transaction.
+Region and RF Profile transactions share the same lock. Controls are disabled during scan. Busy replies, including legacy `msg: "busy"`, fail with an instruction to stop the active RF operation; no automatic write retry occurs. After a Region error, wait at least one second before another GF/SF. A failed SF is not automatically repeated; read GF to recover actual state. If recovery fails, the next configuration write must first complete a recovery read. Retain the original failure in the log and mark cached state unconfirmed. A late/unsolicited SF/GF with no pending matching read cannot confirm a timed-out transaction. Without firmware request IDs, a late reply arriving during a new identical read remains indistinguishable; the shared coordinator and firmware quarantine reduce this risk but do not establish exact correlation.
 
 The web does not change RF power, Link Profile, Q or Session while applying Region. It does not write Region to ESP32 NVS or send an SF at startup.
 
 ## Verification
 
-Automated tests cover all three presets, saved/temporary ACKs, 600-kHz ETSI spacing, full/subset/unknown configurations, malformed fields, mismatched confirmations, error codes, legacy busy replies, cooldown, five-second deadlines, recovery, unavailable firmware, reconnect, scan locking, and preservation of unrelated settings. UI testing uses simulated BLE responses.
+Automated tests cover all three presets, saved/temporary ACKs, 600-kHz ETSI spacing, full/subset/unknown configurations, malformed fields, mismatched confirmations, error codes, legacy busy replies, cooldown, per-command and overall deadlines, recovery, unavailable firmware, reconnect, scan locking, and preservation of unrelated settings. UI testing uses simulated BLE responses.
 
 Hardware acceptance remains required:
 

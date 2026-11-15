@@ -50,6 +50,8 @@ export const useRFIDConnection = () => {
   const inventoryActiveRef = useRef(false);
   const inventoryModeRef = useRef<InventoryMode>('idle');
   const heartbeatTimeoutReportedRef = useRef(false);
+  const configurationActiveRef = useRef(false);
+  const setConfigurationActive = useCallback((active: boolean) => { configurationActiveRef.current = active; }, []);
   const [settings, setSettings] = useState<Settings>({
     power: 30,
     buzzer: true,
@@ -61,8 +63,9 @@ export const useRFIDConnection = () => {
     qValue: 4,
     session: 1,
     scanParams: { interval: 0, dwell: 0, count: 0 },
-    version: '1.0.0',
-    temperature: 0,
+    version: '',
+    readerVersion: '',
+    temperature: null,
     batterySnapshot: null,
     deviceInfo: '',
     deviceName: '',
@@ -99,7 +102,9 @@ export const useRFIDConnection = () => {
     setSettings(s => ({
       ...s,
       batterySnapshot: null,
-      temperature: 0,
+      temperature: null,
+      version: '',
+      readerVersion: '',
       deviceInfo: '',
       deviceName: '',
       deviceCanonicalId: '',
@@ -178,18 +183,21 @@ export const useRFIDConnection = () => {
             }));
         }
     }
-    if (data.cmd === 'GRI') {
-        const power = parseFiniteNumber(data.pwr);
+    if (data.cmd === 'GRI' && !isSettingsError(data) && !isSettingsBusy(data)) {
+        const power = parseFiniteNumber(data.power ?? data.pwr);
         setSettings(s => ({
             ...s,
-            version: data.ver ?? s.version,
+            readerVersion: typeof data.ver === 'string' ? data.ver : s.readerVersion,
             ...(power !== null ? {
                 power,
                 syncRevision: bumpSettingsSyncRevision(s, 'power'),
             } : {}),
         }));
     }
-    if (data.cmd === 'GT') setSettings(s => ({ ...s, temperature: data.val }));
+    if (data.cmd === 'GT' && !isSettingsError(data) && !isSettingsBusy(data)) {
+        const temperature = parseFiniteNumber(data.val);
+        if (temperature !== null) setSettings(s => ({ ...s, temperature }));
+    }
     if (data.cmd === 'GB') {
         const batterySnapshot = parseBatterySnapshot(data);
         if (batterySnapshot) {
@@ -406,7 +414,7 @@ export const useRFIDConnection = () => {
     if (status === 'connected') {
       if (inventoryMode === 'idle') {
         temperaturePollId = window.setInterval(() => {
-          void bleService.getTemperature().catch(e => console.error("Temp poll failed", e));
+          if (!configurationActiveRef.current) void bleService.getTemperature().catch(e => console.error("Temp poll failed", e));
         }, TEMPERATURE_POLL_INTERVAL_MS);
       }
     }
@@ -428,7 +436,7 @@ export const useRFIDConnection = () => {
         if (!snapshot || snapshot.stale || !isBatterySnapshotStale(snapshot)) return current;
         return { ...current, batterySnapshot: { ...snapshot, stale: true } };
       });
-      if (mode === 'batchSaving') {
+      if (mode === 'batchSaving' || configurationActiveRef.current) {
         return;
       }
 
@@ -457,6 +465,7 @@ export const useRFIDConnection = () => {
     disconnect,
     handleConnectionStatusChange,
     setInventoryActive,
+    setConfigurationActive,
     handleDataReceived // Exported to be combined with other handlers
   };
 };

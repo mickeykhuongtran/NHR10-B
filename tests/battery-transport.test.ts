@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { bleService } from '../services/bleService';
 
 const GB = { cmd: 'GB', voltage: 7500, state: 'NORMAL', load: 'load', ver: 2, percent: 61.3, valid: true, charging: false, full: false, health: 0, age_ms: 200 };
-const DI = { cmd: 'DI', val: 'NHR-10', id: 'NHR10-112233445566', display_id: '445566' };
+// Actual REVB identity response has no optional Canonical ID metadata.
+const DI = { cmd: 'DI', val: 'NHR-10' };
 let cmd: FakeCharacteristic;
 let fileReq: FakeCharacteristic;
 let fileData: FakeCharacteristic;
@@ -44,6 +45,11 @@ beforeEach(async () => {
   writes = []; onData.mockClear();
 });
 afterEach(() => { bleService.disconnect(); vi.useRealTimers(); });
+
+it('connects using the REVB NHR-10 name and DI without requiring a Canonical ID', () => {
+  expect(bleService.getDeviceIdentity()).toBeNull();
+  expect(cmd.startNotifications).toHaveBeenCalledOnce();
+});
 
 it('subscribes before GB and routes battery, settings and live tags on the same FF01 channel', async () => {
   const request = bleService.getBattery();

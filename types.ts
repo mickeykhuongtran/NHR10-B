@@ -106,7 +106,8 @@ export interface Settings {
     append?: number;
   };
   version: string;
-  temperature: number;
+  temperature: number | null;
+  readerVersion?: string;
   batterySnapshot: BatterySnapshot | null;
   /** Short, human-readable name shown in the UI (for example NHR10-8658A8). */
   deviceInfo: string;

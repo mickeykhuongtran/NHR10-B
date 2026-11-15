@@ -2,26 +2,26 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { bleService } from '../services/bleService';
 import { ConnectionStatus, LogEntry, RegionStatusUpdate, RegionSupport } from '../types';
 import { DeviceCommand, SettingId, SettingReading, SettingsRequest, SETTING_META, describeSetting, isSettingsBusy, isSettingsError, parseSettingReading, prepareSettingApply } from '../utils/settingsProtocol';
+import { responseTimeoutMs, isRfTransportFault, recoveryMessage } from '../utils/revbProtocol';
 import { isRegionApplyConfirmed, parseRegionReading } from '../utils/regionBand';
 
-export const SETTINGS_READ_TIMEOUT_MS = 5000;
-export const SETTINGS_ACK_TIMEOUT_MS = 4000;
-export const REGION_APPLY_TIMEOUT_MS = 5000;
+export const SETTINGS_READ_TIMEOUT_MS = responseTimeoutMs('GP');
+export const SETTINGS_ACK_TIMEOUT_MS = responseTimeoutMs('SLP');
+export const REGION_APPLY_TIMEOUT_MS = responseTimeoutMs('SF') + responseTimeoutMs('GF');
 export const REGION_ERROR_COOLDOWN_MS = 1000;
 export type SettingsActivity = { id: SettingsRequest['id']; mode: SettingsRequest['mode']; phase: 'Reading' | 'Applying' | 'Verifying' | 'Saving' | 'Waiting'; title: string };
-type Step = { commands: string[]; receive: (data: any) => void; cancel: (error: Error) => void; busy: boolean };
+type Step = { commands: string[]; receive: (data: any) => void; cancel: (error: Error) => void };
 class SettingsTimeout extends Error {}
 class SettingsBusy extends Error {}
 class SettingsDeviceError extends Error {
   constructor(public data: any) {
-    super(`${data.cmd}: ${data.error ?? data.msg ?? data.code ?? 'device rejected the command'}${data.error && data.code !== undefined ? ` (${data.code})` : ''}`);
+    super(`${isRfTransportFault(data) ? recoveryMessage + " " : ""}${data.cmd}: ${data.error ?? data.msg ?? data.code ?? 'device rejected the command'}${data.error && data.code !== undefined ? ` (${data.code})` : ''}`);
   }
 }
 const unsupportedCommand = (error: unknown) => error instanceof SettingsDeviceError && [error.data.error, error.data.msg, error.data.code]
   .some(value => /^(unsupported|not_supported|unsupported_command|unknown_command|unknown_cmd|invalid_command)$/i.test(String(value)));
 const sendBleCommand = (command: DeviceCommand) => bleService.sendCommand(command);
 const noOp = () => {};
-const configCommands = new Set(Object.values(SETTING_META).flatMap(meta => meta.set ? [meta.get, meta.set] : [meta.get]));
 
 export function useSettingsActions(
   addLog: (message: string, type: LogEntry['type'], notice?: LogEntry['notice']) => void,
@@ -32,6 +32,7 @@ export function useSettingsActions(
 ) {
   const [activity, setActivity] = useState<SettingsActivity | null>(null);
   const stepRef = useRef<Step | null>(null);
+  const transportRecoveryRequired = useRef(false);
   const activeRef = useRef(false);
   const recoveryRef = useRef<'profile' | 'baseband' | 'region-band' | null>(null);
   const regionReadConfirmed = useRef(false);
@@ -59,15 +60,10 @@ export function useSettingsActions(
   }, [status]);
 
   const handleDataReceived = useCallback((data: any): boolean => {
+    if (isRfTransportFault(data)) transportRecoveryRequired.current = true;
     if (['GF', 'SF'].includes(data.cmd) && isSettingsError(data) && !isSettingsBusy(data)) regionCooldownUntil.current = Date.now() + REGION_ERROR_COOLDOWN_MS;
     const step = stepRef.current;
     if (!step || (data.cmd === 'SAVE' && data.mode === 'batch')) return false;
-    // A busy reply belongs to the rejected request. A later terminal reply may
-    // belong to the operation already running; it is never our success ACK.
-    if (step.busy && configCommands.has(data.cmd) && !isSettingsBusy(data) && (data.status === 'ok' || isSettingsError(data))) {
-      step.cancel(new SettingsBusy('Reader finished the previous operation.'));
-      return true;
-    }
     if (!step.commands.includes(data.cmd)) return false;
     step.receive(data);
     return true;
@@ -80,32 +76,32 @@ export function useSettingsActions(
       clearTimeout(timer);
       stepRef.current = null;
       if (error && !(error instanceof SettingsBusy) && ['GF', 'SF'].includes(command.cmd)) regionCooldownUntil.current = Date.now() + REGION_ERROR_COOLDOWN_MS;
+      if (command.cmd !== 'DI' && error instanceof SettingsTimeout) transportRecoveryRequired.current = true;
       if (error) reject(error); else resolve(data);
     };
     const step: Step = {
-      commands, busy: false,
+      commands,
       cancel: error => finish(error),
       receive: data => {
         if (isSettingsBusy(data)) {
-          if (!step.busy) {
-            clearTimeout(timer);
-            timer = setTimeout(() => finish(new SettingsBusy('Reader is busy.')), timeout);
-          }
-          step.busy = true;
-          if (mounted.current) setActivity(current => current ? { ...current, phase: 'Waiting' } : current);
+          finish(new SettingsBusy('Reader is busy. Stop the active RF operation before reading or applying this setting again.'));
         } else if (isSettingsError(data)) finish(new SettingsDeviceError(data));
-        else if (!step.busy && accept(data)) finish(undefined, data);
+        else if (accept(data)) finish(undefined, data);
       },
     };
-    // If firmware supplies no completion event, allow its full operation window
-    // before a bounded busy retry. Telemetry cannot release this wait.
-    let timer = setTimeout(() => finish(new SettingsTimeout(`No valid ${command.cmd} response from the reader. Read again or check firmware support in Diagnostics.`)), timeout);
+    // No write retry: REVB busy means an active scan/protection state. A GATT
+    // write ACK is not an RFID completion; telemetry cannot extend this wait.
+    const timer = setTimeout(() => finish(new SettingsTimeout(`${command.cmd === 'DI' ? '' : recoveryMessage + ' '}No valid ${command.cmd} response from the reader.`)), timeout);
     stepRef.current = step;
     if (command.cmd === 'SF') regionApplyDeadline.current = Date.now() + REGION_APPLY_TIMEOUT_MS;
     Promise.resolve().then(() => {
       if (stepRef.current !== step || !connected.current || !mounted.current) return;
       return sendCommand(command);
-    }).catch(error => finish(error instanceof Error ? error : new Error(String(error))));
+    }).catch(error => {
+      if (stepRef.current !== step) return;
+      if (command.cmd !== 'DI') transportRecoveryRequired.current = true;
+      finish(error instanceof Error ? error : new Error(String(error)));
+    });
   }), [sendCommand]);
 
   const waitForRegionCooldown = useCallback(() => new Promise<void>((resolve, reject) => {
@@ -117,33 +113,30 @@ export function useSettingsActions(
       if (stepRef.current === step) stepRef.current = null;
       if (error) reject(error); else resolve();
     };
-    const step: Step = { commands: [], busy: false, receive: noOp, cancel: finish };
+    const step: Step = { commands: [], receive: noOp, cancel: finish };
     const timer = setTimeout(() => finish(), remaining);
     stepRef.current = step;
   }), []);
 
   const waitForReply = useCallback(async (...args: Parameters<typeof waitOnce>) => {
     const started = generation.current;
-    for (let retry = 0; ; retry++) {
-      if (generation.current !== started) throw new Error('Connection changed before confirmation.');
-      if (['GF', 'SF'].includes(args[0].cmd)) await waitForRegionCooldown();
-      if (generation.current !== started) throw new Error('Connection changed before confirmation.');
-      try { return await waitOnce(...args); }
-      catch (error) { if (!(error instanceof SettingsBusy) || retry >= 2) throw error; }
-    }
+    if (['GF', 'SF'].includes(args[0].cmd)) await waitForRegionCooldown();
+    if (generation.current !== started) throw new Error('Connection changed before confirmation.');
+    return waitOnce(...args);
   }, [waitOnce, waitForRegionCooldown]);
 
-  const read = useCallback(async (id: SettingId, timeout = SETTINGS_READ_TIMEOUT_MS): Promise<SettingReading> => {
+  const read = useCallback(async (id: SettingId, timeout = responseTimeoutMs(SETTING_META[id].get)): Promise<SettingReading> => {
     const started = generation.current;
     const meta = SETTING_META[id];
-    // Consume late legacy ACKs during verification so App does not schedule a
-    // duplicate fallback GET. RF recovery accepts only its fresh GET response.
-    const commands = [meta.get, ...(['profile', 'baseband', 'region-band'].includes(id) ? [] : meta.setReplies)];
+    // Only the requested GET confirms current state; unrelated LCD SET replies
+    // cannot finish or fail this read. GCFG remains a legacy error alias.
+    const commands = [meta.get];
     if (['q-session', 'query-params', 'tag-focus'].includes(id)) commands.push('GCFG');
     try {
-      if (timeout <= 0) throw new SettingsTimeout('Region apply verification exceeded 5 seconds.');
+      if (timeout <= 0) throw new SettingsTimeout('Region apply verification deadline exceeded.');
       const response = await waitForReply({ cmd: meta.get }, commands, timeout, data => data.cmd === meta.get && parseSettingReading(id, data) !== null);
       if (!mounted.current || !connected.current || started !== generation.current) throw new Error('Connection changed before confirmation.');
+      if (id !== 'device-name') transportRecoveryRequired.current = false;
       if (id === 'region-band') {
         regionReadConfirmed.current = true;
         regionSupport.current = regionWritesUnsupported.current ? 'unavailable' : 'supported';
@@ -164,11 +157,16 @@ export function useSettingsActions(
   const execute = useCallback(async (request: SettingsRequest, silent = false): Promise<boolean> => {
     const started = generation.current;
     const attempt = ++sequence.current;
-    const title = request.id === 'config' ? 'Configuration' : SETTING_META[request.id].title;
+    const title = SETTING_META[request.id]?.title ?? 'Configuration';
     const setPhase = (phase: SettingsActivity['phase']) => { if (mounted.current) setActivity({ id: request.id, mode: request.mode, phase, title }); };
     let rfWriteStarted = false;
     let regionWriteStarted = false;
     try {
+      if (!SETTING_META[request.id]) throw new Error('NHR10-B has no global configuration SAVE. Apply settings individually; use Save Tag Focus for restart persistence.');
+      if (transportRecoveryRequired.current && request.mode === 'apply') {
+        setPhase('Verifying');
+        await read('power');
+      }
       if (request.id === 'region-band' && request.mode === 'read') {
         if (silent && regionSupport.current === 'unavailable') return false;
         regionReadConfirmed.current = false;
@@ -177,12 +175,6 @@ export function useSettingsActions(
       if (recoveryRef.current && request.mode !== 'read') {
         setPhase('Verifying');
         await read(recoveryRef.current);
-      }
-      if (request.mode === 'save') {
-        setPhase('Saving');
-        await waitForReply({ cmd: 'SAVE' }, ['SAVE'], SETTINGS_READ_TIMEOUT_MS, data => data.status === 'ok');
-        addLog('The reader confirmed that the configuration was saved.', 'info', { id: `settings-${attempt}`, title: 'Configuration saved' });
-        return true;
       }
       const meta = SETTING_META[request.id];
       const rfWrite = request.mode === 'apply' && (request.id === 'profile' || request.id === 'baseband');
@@ -198,34 +190,35 @@ export function useSettingsActions(
           regionWriteStarted = true; regionReadConfirmed.current = false;
           updateRegionStatus({ confirmed: false, error: null });
         }
-        try {
-          const ack = await waitForReply(prepared.command, meta.setReplies, regionWrite ? REGION_APPLY_TIMEOUT_MS : SETTINGS_ACK_TIMEOUT_MS, data => rfWrite || regionWrite
-            ? data.cmd === meta.set && data.status === 'ok'
+        {
+          const ack = await waitForReply(prepared.command, [prepared.command.cmd], responseTimeoutMs(prepared.command.cmd), data => rfWrite || regionWrite
+            ? data.cmd === prepared.command.cmd && data.status === 'ok'
             : data.status === 'ok' || parseSettingReading(request.id, data) !== null);
-          if (rfWrite) {
+          if (request.id === 'profile') {
             const reading = parseSettingReading(request.id, ack);
             if (ack.persisted !== true || !reading || !Object.entries(expected).every(([key, value]) => reading[key] === value)) {
               throw new Error(`${meta.set}: saved value was not confirmed (matching val and persisted:true required).`);
             }
           }
+          if (request.id === 'baseband' && (ack.persisted === false || (ack.val !== undefined && (!parseSettingReading('baseband', ack) || !Object.entries(expected).every(([key, value]) => parseSettingReading('baseband', ack)![key] === value))))) {
+            throw new Error('SRP: acknowledgement conflicts with the requested baseband settings.');
+          }
           if (regionWrite && !isRegionApplyConfirmed(ack, request.value.selection, request.value.save)) {
             throw new Error('SF: matching band/channel limits, verified:true and the requested saved flag were not confirmed.');
           }
-        } catch (error) {
-          if (rfWrite || regionWrite || !(error instanceof SettingsTimeout)) throw error;
         }
       }
       setPhase(request.mode === 'read' ? 'Reading' : 'Verifying');
-      const reading = await read(request.id, regionWrite ? regionApplyDeadline.current - Date.now() : SETTINGS_READ_TIMEOUT_MS);
-      if (regionWrite && Date.now() > regionApplyDeadline.current) throw new SettingsTimeout('Region apply verification exceeded 5 seconds.');
+      const reading = await read(request.id, regionWrite ? Math.min(responseTimeoutMs(meta.get), regionApplyDeadline.current - Date.now()) : responseTimeoutMs(meta.get));
+      if (regionWrite && Date.now() > regionApplyDeadline.current) throw new SettingsTimeout('Region apply verification deadline exceeded.');
       const description = describeSetting(request.id, reading);
       if (expected && !Object.entries(expected).every(([key, value]) => reading[key] === value)) {
         throw new Error(`Read-back differs from the requested value. Reader reports ${description}. Review the setting before retrying.`);
       }
-      if (!silent) addLog(`${title}: ${description}.`, 'info', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read successful' : regionWrite ? (request.value.save ? 'Đã lưu' : 'Đã áp dụng tạm thời') : rfWrite ? 'Đã lưu' : 'Applied and verified' });
+      if (!silent) addLog(`${title}: ${description}.`, 'info', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read successful' : regionWrite ? (request.value.save ? 'Đã lưu' : 'Đã áp dụng tạm thời') : request.id === 'profile' || (request.id === 'tag-focus' && request.persist) ? 'Đã lưu' : 'Applied and verified' });
       return true;
     } catch (error) {
-      if (mounted.current) addLog(`${title}: ${error instanceof Error ? error.message : 'Device command failed.'}`, 'error', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read not confirmed' : request.mode === 'save' ? 'Save not confirmed' : 'Apply not confirmed' });
+      if (mounted.current) addLog(`${title}: ${error instanceof Error ? error.message : 'Device command failed.'}`, 'error', { id: `settings-${attempt}`, title: request.mode === 'read' ? 'Read not confirmed' : 'Apply not confirmed' });
       if (rfWriteStarted || regionWriteStarted) {
         recoveryRef.current = request.id as 'profile' | 'baseband' | 'region-band';
         if (rfWriteStarted) invalidateProfile();
@@ -235,7 +228,7 @@ export function useSettingsActions(
           if (mounted.current && connected.current && started === generation.current) updateRegionStatus({ confirmed: false, support: regionSupport.current, error: error instanceof Error ? error.message : 'Region apply failed.' });
           regionCooldownUntil.current = Date.now() + REGION_ERROR_COOLDOWN_MS;
         }
-        if (connected.current && mounted.current) {
+        if (!(error instanceof SettingsBusy) && connected.current && mounted.current && started === generation.current) {
           setPhase('Verifying');
           try { await read(recoveryRef.current); }
           catch (recoveryError) {
@@ -268,5 +261,7 @@ export function useSettingsActions(
   }, [execute]);
   const run = useCallback((request: SettingsRequest) => runSequence([request]), [runSequence]);
   const isPending = useCallback(() => activeRef.current, []);
-  return { activity, run, runSequence, handleDataReceived, isPending };
+  const isRfRecoveryRequired = useCallback(() => transportRecoveryRequired.current, []);
+  const requireRfRecovery = useCallback(() => { transportRecoveryRequired.current = true; }, []);
+  return { activity, run, runSequence, handleDataReceived, isPending, isRfRecoveryRequired, requireRfRecovery };
 }

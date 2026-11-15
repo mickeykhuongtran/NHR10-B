@@ -107,3 +107,16 @@ it('does not let an unsolicited GB mark identity verification complete', () => {
   receive();
   expect(connection.status).toBe('connecting');
 });
+
+it('pauses GT and false link-timeout recovery during a bounded configuration transaction', async () => {
+  const temperatureReads = ble.getTemperature.mock.calls.length;
+  receive();
+  act(() => connection.setConfigurationActive(true));
+  await advance(19000);
+  expect(ble.getTemperature).toHaveBeenCalledTimes(temperatureReads);
+  expect(ble.recoverFromUnexpectedLinkTimeout).not.toHaveBeenCalled();
+  expect(connection.settings.batterySnapshot?.stale).toBe(true); // never fake freshness
+  receive(); act(() => connection.setConfigurationActive(false));
+  await advance(1000);
+  expect(ble.getTemperature.mock.calls.length).toBeGreaterThan(temperatureReads);
+});

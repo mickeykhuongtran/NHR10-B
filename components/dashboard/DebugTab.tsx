@@ -4,6 +4,7 @@ import { Input } from '../ui/Input';
 import { PageHeader } from './PageHeader';
 import { ConnectionStatus, LogEntry, Settings } from '../../types';
 import { batteryView } from '../../utils/battery';
+import { validPopupContent } from '../../utils/revbProtocol';
 
 interface DebugTabProps {
   logs: LogEntry[];
@@ -43,7 +44,8 @@ export const DebugTab: React.FC<DebugTabProps> = ({ logs, settings, status, isBu
   const telemetry = [
     ['Connection', status],
     ['Canonical ID', settings.deviceCanonicalId || 'Not available'],
-    ['Firmware', connected ? settings.version || 'Not reported' : 'Not connected'],
+    ['Controller firmware', connected ? settings.version || 'Not reported' : 'Not connected'],
+    ['RFID module firmware', connected ? settings.readerVersion || 'Not reported' : 'Not connected'],
     ['Battery', `${batteryDisplay.text} · ${batteryDisplay.status}`],
     ['Battery voltage', battery?.voltageMv != null ? `${battery.voltageMv} mV (last packet)` : 'Not reported'],
     ['Protection state', battery?.protectionState.toUpperCase() ?? 'Not reported'],
@@ -51,7 +53,7 @@ export const DebugTab: React.FC<DebugTabProps> = ({ logs, settings, status, isBu
     ['Battery health mask', battery?.health != null ? `0x${battery.health.toString(16).padStart(2, '0')} (last packet)` : 'Not reported'],
     ['ADC age at receipt', battery?.ageMs === 0xffffffff ? 'No valid ADC sample yet' : battery?.ageMs != null ? `${battery.ageMs} ms` : 'Not reported'],
     ['Battery load at receipt', battery?.loadState ?? 'Not reported'],
-    ['Temperature', connected ? `${settings.temperature} °C` : 'Not available'],
+    ['Temperature', connected && settings.temperature !== null ? `${settings.temperature} °C` : 'Not reported'],
     ['Charger STAT', batteryDisplay.full ? 'Full confirmed by reader' : batteryDisplay.charging === true ? 'Reporting charging' : batteryDisplay.charging === false ? 'Not reporting charging' : 'Unknown'],
   ];
   return <div className="page-content">
@@ -65,9 +67,9 @@ export const DebugTab: React.FC<DebugTabProps> = ({ logs, settings, status, isBu
     <details className="shrink-0 rounded-xl border border-slate-200 bg-white">
       <summary className="px-5 py-4 text-sm font-medium">Display & buzzer test <span className="ml-2 text-xs font-normal text-slate-400">Show a message on the reader</span></summary>
       <div className="border-t border-slate-100 p-5">
-        <div className="grid items-end gap-4 sm:grid-cols-[1fr_140px_auto]"><Input label="Message (up to 15 characters)" value={popupContent} onChange={e => setPopupContent(e.target.value)} maxLength={15} /><Input label="Duration (ms)" type="number" min={100} max={10000} value={popupTime} onChange={e => setPopupTime(e.target.value)} /><label className="flex min-h-10 items-center gap-2 text-sm"><input type="checkbox" checked={beep} onChange={e => setBeep(e.target.checked)} />Beep</label></div>
-        <Button className="mt-4" variant="outline" disabled={!connected || isBusy || pending || !popupContent.trim() || !Number.isInteger(Number(popupTime)) || Number(popupTime) < 100 || Number(popupTime) > 10000} onClick={() => void run(() => onShowPopup(popupContent, Number(popupTime), beep))}>Test on reader</Button>
-        <p className="mt-3 text-xs text-slate-500">The message appears on the device display for the selected duration.</p>
+        <div className="grid items-end gap-4 sm:grid-cols-[1fr_140px_auto]"><Input label="Message (up to 15 UTF-8 bytes)" value={popupContent} onChange={e => setPopupContent(e.target.value)} maxLength={15} /><Input label="Duration (ms)" type="number" min={100} max={10000} value={popupTime} onChange={e => setPopupTime(e.target.value)} /><label className="flex min-h-10 items-center gap-2 text-sm"><input type="checkbox" checked={beep} onChange={e => setBeep(e.target.checked)} />Beep</label></div>
+        <Button className="mt-4" variant="outline" disabled={!connected || isBusy || pending || !validPopupContent(popupContent) || !Number.isInteger(Number(popupTime)) || Number(popupTime) < 100 || Number(popupTime) > 10000} onClick={() => void run(() => onShowPopup(popupContent, Number(popupTime), beep))}>Test on reader</Button>
+        <p className="mt-3 text-xs text-slate-500">Use up to 15 UTF-8 bytes without quotes or backslashes. The message appears on the reader for the selected duration.</p>
       </div>
     </details>
     {actionError && <p role="alert" className="text-sm text-red-700">{actionError}</p>}

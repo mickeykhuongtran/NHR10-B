@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { bleService } from '../services/bleService';
 import { LocateSignalState } from '../types';
+import { MAX_LOCATE_EPC_HEX, validHexWords } from '../utils/revbProtocol';
 
 // NHR-10 sends F/rssi=-100 once when the target has not been read for 2 s.
 // Allow a small BLE margin, then expire a stale reading if that packet was lost.
@@ -50,8 +51,8 @@ export const useLocateLogic = (addLog: (msg: string, type: 'info' | 'error' | 'r
   }, [clearStaleTimer]);
 
   const startLocate = async (epc: string) => {
-    if (typeof epc !== 'string' || !/^[0-9a-f]+$/i.test(epc) || epc.length % 4 !== 0) {
-      addLog('Invalid EPC format for Locate. Use complete hexadecimal words.', 'error');
+    if (typeof epc !== 'string' || !validHexWords(epc, MAX_LOCATE_EPC_HEX)) {
+      addLog('Invalid EPC format for Locate. Use complete hexadecimal words, up to 32 characters.', 'error');
       return;
     }
     if (targetRef.current) return;

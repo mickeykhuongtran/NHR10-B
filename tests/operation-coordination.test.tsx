@@ -2,6 +2,7 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import App from '../App';
+import { responseTimeoutMs } from '../utils/revbProtocol';
 
 let captured: any;
 const mocks = vi.hoisted(() => ({
@@ -53,9 +54,15 @@ it('blocks a new scan until the stop command sequence has finished', async () =>
 it('does not leave a write pending indefinitely without a firmware response', async () => {
   await act(async () => captured.onWriteEpc('', 'E20000112233445566778899'));
   expect(captured.writeStatus).toBe('pending');
-  act(() => vi.advanceTimersByTime(10000));
+  act(() => vi.advanceTimersByTime(responseTimeoutMs('WE')));
   expect(captured.writeStatus).toBe('error');
   expect(captured.writeMessage).toContain('verify');
+  await act(async () => captured.onStartScan());
+  expect(mocks.startScan).not.toHaveBeenCalled();
+  await act(async () => { void captured.onSettingsAction({ id: 'power', mode: 'read' }); });
+  await act(async () => mocks.ble.setCallbacks.mock.calls.at(-1)![0]({ cmd: 'GP', val: 20 }));
+  await act(async () => captured.onStartScan());
+  expect(mocks.startScan).toHaveBeenCalledOnce();
 });
 
 it('reports each write attempt once, including repeated results, without accepting duplicate replies', async () => {
@@ -86,7 +93,7 @@ it('blocks duplicate write calls and mode changes while waiting for a write resp
   await act(async () => captured.onWriteEpc('', '11223344'));
   await act(async () => captured.onStartScan());
   expect(mocks.ble.writeEpc).toHaveBeenCalledOnce(); expect(mocks.startScan).not.toHaveBeenCalled();
-  act(() => vi.advanceTimersByTime(10000));
+  act(() => vi.advanceTimersByTime(responseTimeoutMs('WE')));
   expect(mocks.addLog).toHaveBeenLastCalledWith(expect.stringContaining('No write response'), 'error', expect.objectContaining({ id: 'write-1' }));
 });
 
@@ -112,7 +119,9 @@ it.each([
   const val = `${profile},${q},${session},0`;
   expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'SRP', val });
   await act(async () => captured.onStartScan()); expect(mocks.startScan).not.toHaveBeenCalled();
-  await settingsReply({ cmd: 'SRP', status: 'ok', persisted: true, val, format });
+  await settingsReply({ cmd: 'GLP', val: profile, format });
+  expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'SRP', val });
+  await settingsReply({ cmd: 'SRP', status: 'ok' });
   expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GRP' });
   await settingsReply({ cmd: 'GRP', val, format });
   expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'TF', val: focus });
@@ -146,4 +155,16 @@ it('ignores unsolicited legacy rename replies without logging saved or issuing a
   await settingsReply({ cmd: 'GDN', status: 'ok', val: 'Old name' });
   expect(mocks.ble.sendCommand).not.toHaveBeenCalled();
   expect(mocks.addLog).not.toHaveBeenCalled();
+});
+
+it('blocks new RF starts and writes after quarantine until a coordinated read succeeds', async () => {
+  await settingsReply({ cmd: 'GT', status: 'err', code: 'transport_desynchronized' });
+  await act(async () => captured.onStartScan());
+  await act(async () => captured.onWriteEpc('', 'AABBCCDD'));
+  expect(mocks.startScan).not.toHaveBeenCalled(); expect(mocks.ble.writeEpc).not.toHaveBeenCalled();
+  expect(mocks.addLog).toHaveBeenLastCalledWith(expect.stringContaining('restart the reader and controller'), 'error', expect.objectContaining({ title: 'Reader recovery required' }));
+  await act(async () => { void captured.onSettingsAction({ id: 'power', mode: 'read' }); });
+  await settingsReply({ cmd: 'GP', val: 20 });
+  await act(async () => captured.onStartScan());
+  expect(mocks.startScan).toHaveBeenCalledOnce();
 });
