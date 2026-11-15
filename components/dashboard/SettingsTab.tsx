@@ -9,6 +9,7 @@ import { parseProfileFormat, profileOptions } from '../../utils/rfLinkProfile';
 import { describeRegion, isRegionPreset, REGION_PRESETS, regionChannelCenters, formatRegionMHz } from '../../utils/regionBand';
 
 interface SettingsTabProps {
+  embedded?: boolean;
   isConnected: boolean;
   isBusy: boolean;
   settings: SettingsType;
@@ -106,7 +107,7 @@ const RegionSelectField = ({ value, onChange }: {
   {(Object.keys(REGION_PRESETS) as RegionBandSelection[]).map(key => <option key={key} value={key}>{REGION_PRESETS[key].label}</option>)}
 </select>;
 
-export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy, settings, activity, onAction }: SettingsTabProps) {
+export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy, settings, activity, onAction, embedded = false }: SettingsTabProps) {
   const [power, setPower] = useState(settings.power);
   const [profile, setProfile] = useState(settings.linkProfile);
   const profileFormat = parseProfileFormat(settings.linkProfileFormat);
@@ -187,13 +188,13 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
   };
 
   return (
-    <div className="page-content">
-      <PageHeader
+    <div className={embedded ? 'space-y-4' : 'page-content'}>
+      {!embedded && <PageHeader
         icon={SlidersHorizontal}
         title="Device settings"
         subtitle="Read current values, adjust RF parameters, then apply them to your reader."
         meta={<span className={`rounded-full border px-2 py-0.5 text-xs font-normal ${isConnected ? 'border-[#34C759]/35 bg-[#34C759]/10 text-[#248A3D]' : 'border-[#FF9500]/35 bg-[#FF9500]/10 text-[#A45A00]'}`}>{isConnected ? 'Device online' : 'Offline · controls locked'}</span>}
-      />
+      />}
 
       <p className="text-sm leading-6 text-slate-500">Read retrieves the current value. Apply changes it, then reads it back to verify. Only the requested setting is updated.</p>
       <fieldset disabled={!isConnected || isBusy} aria-label="Device configuration" className="grid min-w-0 grid-cols-1 gap-5 xl:grid-cols-2">
@@ -221,7 +222,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
           <ActionRow {...actionRowProps} id="power" onGet={handleGetPower} onSet={handleSetPower} />
         </SettingsCard>
 
-        <SettingsCard
+        {!embedded && <SettingsCard
           actionId="device-name"
           activeActionKey={activeActionKey}
           title="Bluetooth Device Name"
@@ -232,7 +233,7 @@ export const SettingsTab = React.memo(function SettingsTab({ isConnected, isBusy
             {isConnected && settings.deviceName ? settings.deviceName : 'Not read from device'}
           </p>
           <ActionRow {...actionRowProps} id="device-name" onGet={handleGetDeviceName} />
-        </SettingsCard>
+        </SettingsCard>}
 
         <SettingsCard
           actionId="profile"

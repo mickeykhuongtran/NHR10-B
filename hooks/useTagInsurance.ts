@@ -71,7 +71,7 @@ export function useTagInsurance(status: ConnectionStatus, revision: number) {
     desired.current = enabled; setPending(true); setError(''); clearTimer();
     timer.current = setTimeout(() => {
       // Do not infer OFF from a missing acknowledgement: the device may have
-      // completed its preset while the reply was lost.
+      // activated the mode while the reply was lost.
       desired.current = null; snapshotRef.current = null;
       setSnapshot(null); setPending(false);
       setError('Mode confirmation timed out. Query device status before continuing.');
