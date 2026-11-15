@@ -1,17 +1,18 @@
 # Tag Insurance web validation — 2026-11-16
 
 Final automated checks passed: **331 tests / 16 files**, `tsc --noEmit`,
-Vite production build and V8 coverage gates. The browser bundle is unchanged
-by this test-only revision. The demo remains on `feature/validate-tag` Preview.
+Vite production build and V8 coverage gates, rerun after simplifying the
+Insurance page to visible test criteria, mode controls and results. RF controls
+remain on Device settings. The demo remains on `feature/validate-tag` Preview.
 
 ## Coverage
 
 | Scope | Lines | Branches |
 | --- | ---: | ---: |
-| All application components/hooks/services/utilities | 72.24% (1931/2673) | 71.92% (2103/2924) |
+| All application components/hooks/services/utilities | 72.24% (1931/2673) | 71.88% (2099/2920) |
 | Tag Insurance controller | 100% | 98.50% |
 | Tag Insurance protocol/validation | 100% | 87.34% |
-| Tag Insurance page | 93.75% | 92.75% |
+| Tag Insurance page | 93.75% | 93.84% |
 
 The report includes untested source files. Global floors are 70% for lines,
 statements, functions and branches; critical Insurance files have separate

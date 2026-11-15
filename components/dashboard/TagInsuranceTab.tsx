@@ -1,19 +1,13 @@
 import React, { useState } from 'react';
 import { CircleCheck, TriangleAlert } from 'lucide-react';
 import { TagInsuranceController } from '../../hooks/useTagInsurance';
-import { SettingsActivity } from '../../hooks/useSettingsActions';
-import { Settings } from '../../types';
-import { SettingsRequest } from '../../utils/settingsProtocol';
 import { defaultInsuranceConfig, insuranceErrorReason, insuranceInstruction, insuranceTitles, insuranceWindowCount, validInsuranceConfig } from '../../utils/tagInsurance';
 import { Button } from '../ui/Button';
-import { SettingsTab } from './SettingsTab';
 
 type Props = {
   controller: TagInsuranceController; connected: boolean; busy: boolean;
-  settings: Settings; settingsActivity: SettingsActivity | null;
-  onSettingsAction: (request: SettingsRequest) => void | Promise<void>;
 };
-export function TagInsuranceTab({ controller: c, connected, busy, settings, settingsActivity, onSettingsAction }: Props) {
+export function TagInsuranceTab({ controller: c, connected, busy }: Props) {
   const [draft, setDraft] = useState(c.config);
   const v = c.snapshot;
   const enabled = v?.enabled === true;
@@ -36,7 +30,7 @@ export function TagInsuranceTab({ controller: c, connected, busy, settings, sett
   const disabled = !connected || busy || c.pending || !v || v.busy;
   return <section className="h-full overflow-y-auto p-5 sm:p-8 space-y-6" aria-label="Tag Insurance">
     <div><h1 className="text-2xl font-semibold">Tag Insurance</h1>
-      <p className="mt-2 text-sm text-slate-600">Set up your reference test, enable the mode, then use the reader trigger. One press runs for the configured Remain Time; press again to cancel.</p></div>
+      <p className="mt-2 text-sm text-slate-600">Set the test criteria, enable the mode, then use the reader trigger. RF parameters use the current configuration from Device settings.</p></div>
     <div className="flex flex-wrap gap-3">
       <Button disabled={disabled || (!enabled && !validInsuranceConfig(nextConfig))} onClick={() => void c.setMode(!enabled, enabled ? c.config : nextConfig)}>
         {c.pending ? 'Waiting for device…' : enabled ? 'Stop Tag Insurance' : 'Enable with current RF settings'}
@@ -62,15 +56,8 @@ export function TagInsuranceTab({ controller: c, connected, busy, settings, sett
         <p className="mt-2">{v.bins}/{insuranceWindowCount(v.duration)} occupied time bins · maximum gap {v.gap} ms</p>
       </details>
     </div>}
-    <section aria-label="Insurance RF setup" className="rounded-2xl border border-slate-200 p-5 space-y-4">
-      <h2 className="font-semibold">RF setup</h2>
-      <p className="text-sm text-slate-600">{enabled ? 'Stop Tag Insurance above to change settings, then enable it again.' : 'Read or apply the values below before enabling. Enabling and disabling this mode do not change RF settings.'}</p>
-      <p className="text-xs text-slate-500">Power, profile, session, Q, Tag Focus and query timing are your test conditions. Calibrate the thresholds with known good and poor tags at the same position. EPC filters must be cleared so a second tag cannot be hidden.</p>
-      <SettingsTab embedded isConnected={connected} isBusy={busy || c.locked} settings={settings}
-        activity={settingsActivity} onAction={onSettingsAction} />
-    </section>
-    <details className="rounded-2xl border border-slate-200 p-5">
-      <summary className="cursor-pointer font-medium">Test time and pass criteria</summary>
+    <section aria-label="Test time and pass criteria" className="rounded-2xl border border-slate-200 p-5">
+      <h2 className="font-semibold">Test time and pass criteria</h2>
       <fieldset disabled={!connected || enabled || c.pending || busy} className="mt-4">
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {thresholdFields.map(({ key, label, min, max, help }) =>
@@ -85,6 +72,6 @@ export function TagInsuranceTab({ controller: c, connected, busy, settings, sett
         {!validInsuranceConfig(displayed) && <p role="alert" className="mt-3 text-sm text-red-700">Use whole numbers: time 1000–30000 ms, reads 1–10000, windows 1–{windows}, silence 100–{displayed.dur} ms. Adjust the thresholds to fit the chosen time.</p>}
         <p className="mt-4 text-xs leading-5 text-slate-500">Exactly one EPC and all three thresholds must pass over the configured time, including the first and last no-read gaps. Initial thresholds are provisional. Each trigger starts a new independent test; the device does not decide when to replace a tag.</p>
       </fieldset>
-    </details>
+    </section>
   </section>;
 }

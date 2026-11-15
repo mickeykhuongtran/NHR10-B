@@ -2,7 +2,7 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useTagInsurance, TagInsuranceController } from '../hooks/useTagInsurance';
-import { ConnectionStatus, Settings } from '../types';
+import { ConnectionStatus } from '../types';
 import { TagInsuranceTab } from '../components/dashboard/TagInsuranceTab';
 import { defaultInsuranceConfig, insuranceInstruction, parseInsuranceConfig, parseInsuranceSnapshot, validInsuranceConfig } from '../utils/tagInsurance';
 const ble = vi.hoisted(() => ({ sendCommand: vi.fn() }));
@@ -10,12 +10,6 @@ vi.mock('../services/bleService', () => ({ bleService: ble }));
 let controller: TagInsuranceController;
 let root: Root;
 let container: HTMLDivElement;
-const settings: Settings = {
-  power: 24, buzzer: true, tagFocus: true, fastTid: false, linkProfile: 5185,
-  linkProfileFormat: 2, linkProfileConfirmed: true, qValue: 7, session: 255,
-  scanParams: { interval: 30, dwell: 2, count: 0, append: 0 },
-  version: '', temperature: null, batterySnapshot: null, deviceInfo: '', deviceName: '', deviceCanonicalId: '',
-};
 const off = { cmd: 'TI', on: 0, s: 'off', id: 0, a: 0, e: '', n: 0, t: 0, b: 0, g: 0, r: 0, z: 0 };
 const ready = { ...off, on: 1, s: 'ready', a: 1 };
 function Harness({ status = 'connected', revision = 1 }: { status?: ConnectionStatus; revision?: number }) {
@@ -204,7 +198,7 @@ it('refuses custom time on legacy/unknown firmware and resets capability on reco
 it('uses snapshot timing for result progress even if TIC was missed', () => {
   rx({ ...ready, s: 'running', id: 2, z: 1, t: 4000, b: 16, dur: 5000 });
   const value = controller;
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} />));
   expect(container.querySelector('progress')?.max).toBe(5000);
   expect(container.querySelector('progress')?.value).toBe(4000);
   expect(container.querySelector<HTMLInputElement>('#ti-dur')?.value).toBe('5000');
@@ -215,7 +209,7 @@ it('uses snapshot timing for result progress even if TIC was missed', () => {
 it('exposes Remain Time and blocks inconsistent thresholds without silently changing them', () => {
   rx(off);rx({ cmd: 'TIC', ...defaultInsuranceConfig });
   const value=controller;
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} />));
   const time=container.querySelector<HTMLInputElement>('#ti-dur')!;
   expect(time.disabled).toBe(false);
   act(() => {
@@ -232,7 +226,7 @@ it('uses fixed legacy timing after switching devices without trapping a custom d
   rx(off);rx({ cmd: 'TIC', ...defaultInsuranceConfig, dur: 5000 });
   const value=controller;
   const setMode=vi.fn().mockResolvedValue(undefined);
-  const draw=(supports:boolean) => root.render(<TagInsuranceTab controller={{ ...value, durationSupported:supports, setMode }} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />);
+  const draw=(supports:boolean) => root.render(<TagInsuranceTab controller={{ ...value, durationSupported:supports, setMode }} connected busy={false} />);
   act(() => draw(true));
   expect(container.querySelector<HTMLInputElement>('#ti-dur')?.value).toBe('5000');
   act(() => draw(false));
@@ -244,7 +238,7 @@ it('uses fixed legacy timing after switching devices without trapping a custom d
 it('explains data integrity errors without turning passing metrics into a quality verdict', () => {
   rx({ ...ready, s: 'error', r: 2, id: 1, e: 'E280689400005035E6130838', n: 186, t: 2999, b: 12, g: 49 });
   const value = controller;
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} />));
   expect(container.textContent).toContain('Read data integrity error');
   expect(container.textContent).toContain('r=2');
   expect(container.textContent).toContain('not a tag quality verdict');
@@ -254,7 +248,7 @@ it('explains data integrity errors without turning passing metrics into a qualit
 it('explains total reads, time coverage and longest silence separately', () => {
   rx(off);
   const value = controller;
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} />));
   expect(container.textContent).toContain('not 30 reads per second');
   expect(container.textContent).toContain('12 windows');
   expect(container.textContent).toContain('start to first read and last read to the end');
@@ -263,7 +257,7 @@ it('explains total reads, time coverage and longest silence separately', () => {
 it('keeps the Normal button disabled while a detected second tag is still being stopped', () => {
   rx({ ...ready, s: 'more', z: 1 });
   const value = controller;
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} />));
   expect(container.querySelector('button')?.disabled).toBe(true);
   expect(container.querySelector('fieldset')?.disabled).toBe(true);
   expect(container.querySelector('[role="status"]')?.textContent).toBe('CHECK TAG');
@@ -280,29 +274,29 @@ it.each([
 ])('distinguishes %s results without changing the wire state', (state, title, iconColor) => {
   rx({ ...ready, s: state, z: 0, t: 3000 });
   const value = controller;
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} />));
   const result = container.querySelector('[role="status"]');
   expect(result?.textContent).toBe(title);
   expect(result?.querySelector('svg')?.classList.contains(iconColor)).toBe(true);
 });
 
-it('configures current RF values on the Insurance page without imposing a preset', () => {
+it('keeps test configuration separate from Device settings and locks it during Insurance', () => {
   rx(off);
   const value = controller;
-  const action = vi.fn();
-  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={action} />));
+  const setMode = vi.fn().mockResolvedValue(undefined);
+  act(() => root.render(<TagInsuranceTab controller={{ ...value, setMode }} connected busy={false} />));
   expect(container.textContent).not.toContain('Fixed preset');
-  expect(container.textContent).not.toContain('Bluetooth Device Name');
-  expect(container.querySelector<HTMLSelectElement>('[aria-label="RF link profile"]')?.value).toBe('5185');
-  expect(container.querySelector<HTMLSelectElement>('[aria-label="session"]')?.value).toBe('255');
-  expect(action).not.toHaveBeenCalled();
-  const power = container.querySelector('[aria-label="Power"]')!;
-  const apply = Array.from(power.querySelectorAll('button')).find(b => b.textContent === 'Apply')!;
-  act(() => apply.click());
-  expect(action).toHaveBeenCalledWith({ id: 'power', mode: 'apply', value: 24 });
-  action.mockClear();
-  act(() => root.render(<TagInsuranceTab controller={{ ...value, locked: true, snapshot: parseInsuranceSnapshot(ready) }} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={action} />));
-  expect(container.querySelector<HTMLFieldSetElement>('[aria-label="Device configuration"]')?.disabled).toBe(true);
-  act(() => apply.click()); expect(action).not.toHaveBeenCalled();
-  expect(container.textContent).toContain('Stop Tag Insurance above to change settings');
+  expect(container.textContent).toContain('Device settings');
+  expect(container.querySelector('[aria-label="Device configuration"]')).toBeNull();
+  expect(container.querySelector('[aria-label="RF link profile"]')).toBeNull();
+  const criteria = container.querySelector('[aria-label="Test time and pass criteria"]')!;
+  expect(criteria.closest('details')).toBeNull();
+  expect(criteria.querySelectorAll('input')).toHaveLength(4);
+  expect(criteria.querySelector('fieldset')?.disabled).toBe(false);
+  act(() => container.querySelector('button')!.click());
+  expect(setMode).toHaveBeenCalledWith(true, defaultInsuranceConfig);
+  act(() => root.render(<TagInsuranceTab controller={{ ...value, setMode, locked: true, snapshot: parseInsuranceSnapshot(ready) }} connected busy={false} />));
+  expect(criteria.querySelector('fieldset')?.disabled).toBe(true);
+  act(() => container.querySelector('button')!.click());
+  expect(setMode).toHaveBeenLastCalledWith(false, value.config);
 });

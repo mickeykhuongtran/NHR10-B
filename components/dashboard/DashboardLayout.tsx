@@ -141,7 +141,6 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
           </div>
           <main id="main-content" ref={mainRef} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 overflow-hidden outline-none">
           {activeTab === 7 && props.insurance && <TagInsuranceTab controller={props.insurance} connected={props.status === 'connected'}
-            settings={props.settings} settingsActivity={props.settingsActivity} onSettingsAction={props.onSettingsAction}
             busy={props.isScanning || props.isLocating || props.isBatchSaving || props.isFileTransferring || props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null} />}
           {activeTab === 1 && (
             <ScannerTab 
