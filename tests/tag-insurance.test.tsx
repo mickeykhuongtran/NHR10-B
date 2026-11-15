@@ -43,6 +43,84 @@ it('waits for the mode result, not the Bluetooth write promise', async () => {
   expect(controller.isLocked()).toBe(true);
   rx(off); expect(controller.isLocked()).toBe(false);
 });
+
+it('keeps activation pending through stale OFF and ignores duplicate commands', async () => {
+  rx(off);
+  await act(async () => controller.setMode(true, defaultInsuranceConfig));
+  const count = ble.sendCommand.mock.calls.length;
+  rx(off);
+  expect(controller.pending).toBe(true);
+  await act(async () => controller.setMode(false, defaultInsuranceConfig));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(ble.sendCommand).toHaveBeenCalledTimes(count);
+  rx(ready);
+  expect(controller.pending).toBe(false);
+});
+
+it('recovers from missing boot status without guessing the current mode', async () => {
+  await act(async () => vi.advanceTimersByTimeAsync(6000));
+  expect(controller.error).toContain('No Insurance status');
+  expect(controller.isLocked()).toBe(true);
+  rx({ cmd: 'GTI', status: 'err', msg: 'booting' });
+  expect(controller.error).toContain('Device: booting');
+  rx(off);
+  expect(controller.error).toBe('');
+  expect(controller.isLocked()).toBe(false);
+});
+
+it.each([new Error('GATT query rejected'), 'failure'])('reports query failure and retains the confirmed mode: %s', async failure => {
+  rx(ready);
+  ble.sendCommand.mockRejectedValueOnce(failure);
+  await act(async () => controller.query());
+  expect(controller.error).toBe(failure instanceof Error ? failure.message : 'Status query failed');
+  expect(controller.snapshot?.enabled).toBe(true);
+});
+
+it.each([new Error('GATT write rejected'), 'failure'])('resynchronizes after a failed mode write: %s', async failure => {
+  rx(off);
+  ble.sendCommand.mockRejectedValueOnce(failure);
+  await act(async () => controller.setMode(true, defaultInsuranceConfig));
+  expect(controller.error).toBe(failure instanceof Error ? failure.message : 'Mode command failed');
+  expect(controller.pending).toBe(false);
+  expect(controller.snapshot).toBeNull();
+  expect(controller.isLocked()).toBe(true);
+  expect(ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GTI' });
+  rx(ready); // The write may have reached the device before the link failed.
+  expect(controller.snapshot?.enabled).toBe(true);
+});
+
+it.each(['query', 'mode'])('ignores the previous connection failure after reconnect: %s', async operation => {
+  rx(off);
+  let reject!: (reason: Error) => void;
+  ble.sendCommand.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail; }));
+  let pending!: Promise<void>;
+  act(() => { pending = operation === 'query' ? controller.query() : controller.setMode(true, defaultInsuranceConfig); });
+  act(() => root.render(<Harness revision={2} />));
+  rx(ready);
+  await act(async () => { reject(new Error('old connection')); await pending; });
+  expect(controller.error).toBe('');
+  expect(controller.snapshot?.enabled).toBe(true);
+  expect(controller.pending).toBe(false);
+});
+
+it('rejects mode requests without status, with invalid thresholds, or while disconnected', async () => {
+  await act(async () => controller.setMode(true, defaultInsuranceConfig));
+  rx(off);
+  await act(async () => controller.setMode(true, { ...defaultInsuranceConfig, bins: 13 }));
+  act(() => root.render(<Harness status="disconnected" />));
+  await act(async () => controller.setMode(true, defaultInsuranceConfig));
+  await act(async () => vi.advanceTimersByTimeAsync(10000));
+  expect(ble.sendCommand.mock.calls.map(([command]) => command.cmd)).toEqual(['GTI']);
+});
+
+it('does not replace valid status or time capability with malformed notifications', () => {
+  rx(ready); rx({ cmd: 'TIC', ...defaultInsuranceConfig, dur: 5000 });
+  rx({ ...ready, t: 30001, dur: 30000 });
+  rx({ cmd: 'TIC', ...defaultInsuranceConfig, dur: '5000' });
+  expect(controller.config.dur).toBe(5000);
+  expect(controller.snapshot?.elapsed).toBe(0);
+  expect(controller.handleDataReceived({ cmd: 'GP', val: 10 })).toBe(false);
+});
 it('does not infer normal mode when activation times out', async () => {
   rx(off); await act(async () => controller.setMode(true, defaultInsuranceConfig));
   await act(async () => vi.advanceTimersByTimeAsync(45000));
