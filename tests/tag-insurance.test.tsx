@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useTagInsurance, TagInsuranceController } from '../hooks/useTagInsurance';
 import { ConnectionStatus, Settings } from '../types';
 import { TagInsuranceTab } from '../components/dashboard/TagInsuranceTab';
-import { defaultInsuranceConfig, insuranceInstruction, parseInsuranceSnapshot, validInsuranceConfig } from '../utils/tagInsurance';
+import { defaultInsuranceConfig, insuranceInstruction, parseInsuranceConfig, parseInsuranceSnapshot, validInsuranceConfig } from '../utils/tagInsurance';
 const ble = vi.hoisted(() => ({ sendCommand: vi.fn() }));
 vi.mock('../services/bleService', () => ({ bleService: ble }));
 let controller: TagInsuranceController;
@@ -84,8 +84,84 @@ it('treats failed trials as independent tests without directing tag replacement'
   expect(insuranceInstruction({ ...first, state: 'error', reason: 3 })).toContain('not a tag quality verdict');
 });
 it('fits the worst-case status in one 182-byte notification', () => {
-  const packet = { ...ready, s: 'cancelled', id: 0xffffffff, n: 0xffffffff, e: 'F'.repeat(32), a: 2, t: 3000, b: 12, g: 3000, r: 6, z: 1 };
+  const packet = { ...ready, s: 'cancelled', id: 0xffffffff, n: 0xffffffff, e: 'F'.repeat(32), a: 2, t: 30000, b: 120, g: 30000, r: 6, z: 1, dur: 30000 };
   expect(new TextEncoder().encode(JSON.stringify(packet)).length).toBeLessThanOrEqual(182);
+  expect(parseInsuranceSnapshot(packet)?.duration).toBe(30000);
+});
+
+it('accepts configurable timing and partial final bins, with strict limits', () => {
+  const short = { ...defaultInsuranceConfig, dur: 1001, bins: 5, gap: 1001 };
+  expect(validInsuranceConfig(short)).toBe(true);
+  expect(validInsuranceConfig({ ...short, dur: 1000 })).toBe(false);
+  expect(validInsuranceConfig({ ...short, gap: 1002 })).toBe(false);
+  expect(validInsuranceConfig({ ...short, dur: 999 })).toBe(false);
+  expect(validInsuranceConfig({ ...short, dur: 30001 })).toBe(false);
+  expect(validInsuranceConfig({ ...short, dur: 1500.5 })).toBe(false);
+  expect(validInsuranceConfig({ ...short, dur: 30000, bins: 120 })).toBe(true);
+  expect(parseInsuranceConfig({ cmd: 'TIC', min: 30, bins: 10, gap: 500 })).toEqual(defaultInsuranceConfig);
+  expect(parseInsuranceConfig({ cmd: 'TIC', ...short, dur: '1001' })).toBeNull();
+  expect(parseInsuranceSnapshot({ ...ready, dur: 5000, t: 5001 })).toBeNull();
+  expect(parseInsuranceSnapshot({ ...ready, dur: 1001, b: 6 })).toBeNull();
+  expect(parseInsuranceSnapshot({ ...ready, dur: 5000, t: 4000 })?.elapsed).toBe(4000);
+});
+
+it('refuses custom time on legacy/unknown firmware and resets capability on reconnect', async () => {
+  rx(off);
+  await act(async () => controller.setMode(true, { ...defaultInsuranceConfig, dur: 5000 }));
+  expect(controller.pending).toBe(false);
+  expect(ble.sendCommand).toHaveBeenCalledTimes(1); // GTI only
+  rx({ cmd: 'TIC', min: 30, bins: 10, gap: 500 });
+  expect(controller.durationSupported).toBe(false);
+  rx({ cmd: 'TIC', ...defaultInsuranceConfig, dur: 5000 });
+  expect(controller.durationSupported).toBe(true);
+  await act(async () => controller.setMode(true, { ...defaultInsuranceConfig, dur: 5000 }));
+  expect(ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'TI', val: 1, ...defaultInsuranceConfig, dur: 5000 });
+  rx({ ...ready, dur: 5000 });
+  expect(controller.pending).toBe(false);
+  act(() => root.render(<Harness status="disconnected" />));
+  expect(controller.durationSupported).toBeNull();
+  expect(controller.config).toEqual(defaultInsuranceConfig);
+});
+
+it('uses snapshot timing for result progress even if TIC was missed', () => {
+  rx({ ...ready, s: 'running', id: 2, z: 1, t: 4000, b: 16, dur: 5000 });
+  const value = controller;
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  expect(container.querySelector('progress')?.max).toBe(5000);
+  expect(container.querySelector('progress')?.value).toBe(4000);
+  expect(container.querySelector<HTMLInputElement>('#ti-dur')?.value).toBe('5000');
+  expect(container.textContent).toContain('16/20 occupied time bins');
+  expect(container.textContent).not.toContain('3-second');
+});
+
+it('exposes Remain Time and blocks inconsistent thresholds without silently changing them', () => {
+  rx(off);rx({ cmd: 'TIC', ...defaultInsuranceConfig });
+  const value=controller;
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  const time=container.querySelector<HTMLInputElement>('#ti-dur')!;
+  expect(time.disabled).toBe(false);
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(time,'1000');
+    time.dispatchEvent(new Event('input',{bubbles:true}));
+  });
+  expect(container.querySelector<HTMLInputElement>('#ti-bins')?.value).toBe('10');
+  expect(container.querySelector<HTMLInputElement>('#ti-bins')?.max).toBe('4');
+  expect(container.querySelector('button')?.disabled).toBe(true);
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('windows 1–4');
+});
+
+it('uses fixed legacy timing after switching devices without trapping a custom draft', () => {
+  rx(off);rx({ cmd: 'TIC', ...defaultInsuranceConfig, dur: 5000 });
+  const value=controller;
+  const setMode=vi.fn().mockResolvedValue(undefined);
+  const draw=(supports:boolean) => root.render(<TagInsuranceTab controller={{ ...value, durationSupported:supports, setMode }} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />);
+  act(() => draw(true));
+  expect(container.querySelector<HTMLInputElement>('#ti-dur')?.value).toBe('5000');
+  act(() => draw(false));
+  expect(container.querySelector<HTMLInputElement>('#ti-dur')?.value).toBe('3000');
+  expect(container.querySelector<HTMLInputElement>('#ti-dur')?.disabled).toBe(true);
+  act(() => container.querySelector('button')!.click());
+  expect(setMode).toHaveBeenCalledWith(true,defaultInsuranceConfig);
 });
 it('explains data integrity errors without turning passing metrics into a quality verdict', () => {
   rx({ ...ready, s: 'error', r: 2, id: 1, e: 'E280689400005035E6130838', n: 186, t: 2999, b: 12, g: 49 });
@@ -112,7 +188,24 @@ it('keeps the Normal button disabled while a detected second tag is still being 
   act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
   expect(container.querySelector('button')?.disabled).toBe(true);
   expect(container.querySelector('fieldset')?.disabled).toBe(true);
-  expect(container.textContent).toContain('Finishing');
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('CHECK TAG');
+  expect(container.querySelector('[role="status"] svg')?.classList.contains('text-amber-500')).toBe(true);
+  expect(container.textContent).toContain('not a tag quality verdict');
+});
+
+it.each([
+  ['more', 'CHECK TAG', 'text-amber-500'],
+  ['no_read', 'NO TAG FOUND', 'text-amber-500'],
+  ['check', 'TAG ERROR', 'text-red-600'],
+  ['error', 'TEST ERROR', 'text-red-600'],
+  ['ok', 'TAG OK', 'text-emerald-600'],
+])('distinguishes %s results without changing the wire state', (state, title, iconColor) => {
+  rx({ ...ready, s: state, z: 0, t: 3000 });
+  const value = controller;
+  act(() => root.render(<TagInsuranceTab controller={value} connected busy={false} settings={settings} settingsActivity={null} onSettingsAction={vi.fn()} />));
+  const result = container.querySelector('[role="status"]');
+  expect(result?.textContent).toBe(title);
+  expect(result?.querySelector('svg')?.classList.contains(iconColor)).toBe(true);
 });
 
 it('configures current RF values on the Insurance page without imposing a preset', () => {
