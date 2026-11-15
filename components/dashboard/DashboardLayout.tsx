@@ -13,9 +13,12 @@ import { OperationsTab } from './OperationsTab';
 import { SettingsTab } from './SettingsTab';
 import { DebugTab } from './DebugTab';
 import { HistoryTab } from './HistoryTab';
+import { TagInsuranceTab } from './TagInsuranceTab';
+import type { TagInsuranceController } from '../../hooks/useTagInsurance';
 import { BatchSaveInfo, Settings, ConnectionStatus, Tag, LogEntry, ScanStats, FileTransferStatus, LocateSignalState } from '../../types';
 
 interface DashboardLayoutProps {
+  insurance?: TagInsuranceController;
   status: ConnectionStatus;
   settings: Settings;
   tags: Tag[];
@@ -81,11 +84,12 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
     { id: 3, label: 'Write EPC', detail: 'Program a tag' },
     { id: 6, label: 'Saved data', detail: 'Batch inventory & export' },
   ];
-  const moreTabs = [{ id: 4, label: 'Device settings' }, { id: 5, label: 'Diagnostics' }];
+  const moreTabs = [{ id: 7, label: 'Tag Insurance' }, { id: 4, label: 'Device settings' }, { id: 5, label: 'Diagnostics' }];
   const isMoreTabActive = moreTabs.some(tab => tab.id === activeTab);
   const mainRef = useRef<HTMLElement>(null);
   useEffect(() => { mainRef.current?.focus({ preventScroll: true }); }, [activeTab]);
-  const deviceBusy = props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null;
+  const insuranceLocked = props.status === 'connected' && (props.insurance?.locked ?? false);
+  const deviceBusy = props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null || insuranceLocked;
   const operationActive = props.isScanning || props.isLocating || props.isBatchSaving || deviceBusy;
   const operationLabel = props.settingsActivity ? `${props.settingsActivity.phase} ${props.settingsActivity.title}…` : props.commandPending ? 'Waiting for device command…' : props.writeStatus === 'pending' ? 'Waiting for write confirmation…' : props.isBatchSaving ? 'Saving batch data on device…' : props.isFileTransferring ? 'Downloading saved data…' : props.isLocating ? 'Finding a tag' : props.isScanning ? (props.activeScanType === 'batch' ? 'Batch scan in progress' : 'Live scan in progress') : props.status === 'connected' ? 'Device ready' : props.status === 'connecting' ? 'Connecting to the reader…' : 'Connect your reader to begin';
   const showStop = (props.isLocating && activeTab !== 2) || (props.isScanning && activeTab !== 1);
@@ -132,10 +136,12 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
         </aside>
         <div className="order-1 flex min-h-0 min-w-0 flex-1 flex-col lg:order-2">
           <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 text-xs text-slate-500 sm:px-6 sm:text-sm" aria-label="Device activity">
-            <span role="status" className={`min-w-0 line-clamp-2 ${operationActive || props.isFileTransferring ? 'text-blue-700' : ''}`}>{operationLabel}</span>
+            <span role="status" className={`min-w-0 line-clamp-2 ${operationActive || props.isFileTransferring ? 'text-blue-700' : ''}`}>{insuranceLocked ? (props.insurance?.snapshot?.enabled ? 'Tag Insurance · RF controls reserved. Open More → Tag Insurance.' : 'Checking device mode… Open More → Tag Insurance.') : operationLabel}</span>
             <Button className={`w-[112px] shrink-0 !px-2 ${showStop ? '' : 'invisible'}`} variant="outline" size="sm" disabled={!showStop || props.isBatchSaving || deviceBusy} tabIndex={showStop ? 0 : -1} aria-hidden={!showStop} onClick={props.isLocating ? props.onStopLocate : props.activeScanType === 'batch' ? props.onStopBatch : props.onStopScan}>Stop {props.isLocating ? 'finding' : 'scan'}</Button>
           </div>
           <main id="main-content" ref={mainRef} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 overflow-hidden outline-none">
+          {activeTab === 7 && props.insurance && <TagInsuranceTab controller={props.insurance} connected={props.status === 'connected'}
+            busy={props.isScanning || props.isLocating || props.isBatchSaving || props.isFileTransferring || props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null} />}
           {activeTab === 1 && (
             <ScannerTab 
               isScanning={props.isScanning}
@@ -216,7 +222,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
 
           {activeTab === 4 && (
             <SettingsTab 
-              isBusy={props.isScanning || props.isLocating || props.isBatchSaving || props.commandPending || props.writeStatus === 'pending' || props.isFileTransferring}
+              isBusy={insuranceLocked || props.isScanning || props.isLocating || props.isBatchSaving || props.commandPending || props.writeStatus === 'pending' || props.isFileTransferring}
               activity={props.settingsActivity}
               onAction={props.onSettingsAction}
               settings={props.settings}

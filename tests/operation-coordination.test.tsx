@@ -18,6 +18,7 @@ vi.mock('../hooks/useScanLogic', () => ({ useScanLogic: () => ({ ...mocks.scan, 
 vi.mock('../hooks/useLocateLogic', () => ({ useLocateLogic: () => ({ isLocating: false, stopLocate: mocks.stopLocate, resetLocateState: mocks.resetLocate, handleDataReceived: vi.fn() }) }));
 vi.mock('../hooks/useFileTransfer', () => ({ useFileTransfer: () => ({ transferStatus: 'idle' }) }));
 let root: Root;
+const insuranceOff = { cmd: 'TI', on: 0, s: 'off', id: 0, a: 0, e: '', n: 0, t: 0, b: 0, g: 0, r: 0, z: 0 };
 beforeEach(() => {
   vi.useFakeTimers(); vi.clearAllMocks();
   mocks.connection.status = 'connected';
@@ -27,6 +28,8 @@ beforeEach(() => {
   mocks.ble.sendCommand.mockResolvedValue(undefined);
   root = createRoot(document.createElement('div'));
   act(() => root.render(<App />));
+  act(() => mocks.ble.setCallbacks.mock.calls.at(-1)![0](insuranceOff));
+  mocks.ble.sendCommand.mockClear();
 });
 afterEach(() => { act(() => root.unmount()); vi.useRealTimers(); });
 
@@ -109,6 +112,22 @@ it('blocks scans and tag writes until a settings response is verified', async ()
 });
 
 const settingsReply = async (data: object) => { await act(async () => { mocks.ble.setCallbacks.mock.calls.at(-1)![0](data); }); };
+it('reserves scan/write/settings while Insurance is enabled and allows normal operation after confirmed exit', async () => {
+  await settingsReply({ ...insuranceOff, on: 1, s: 'ready', a: 1 });
+  await act(async () => captured.onStartScan());
+  await act(async () => captured.onWriteEpc('', 'AABBCCDD'));
+  await act(async () => captured.onSettingsAction({ id: 'power', mode: 'read' }));
+  expect(mocks.startScan).not.toHaveBeenCalled(); expect(mocks.ble.writeEpc).not.toHaveBeenCalled();
+  expect(mocks.ble.sendCommand).not.toHaveBeenCalled();
+  await settingsReply(insuranceOff);
+  await act(async () => captured.onStartScan()); expect(mocks.startScan).toHaveBeenCalledOnce();
+});
+it('does not activate Insurance while a settings transaction is pending', async () => {
+  await act(async () => { void captured.onSettingsAction({ id: 'power', mode: 'read' }); });
+  await act(async () => captured.insurance.setMode(true, { min: 30, bins: 10, gap: 500 }));
+  expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GP' });
+  await settingsReply({ cmd: 'GP', val: 20 });
+});
 it.each([
   [2, 'standard', 15, 4, 1, 1], [2, 'quick', 11, 2, 0, 0], [2, 'deep', 13, 4, 1, 1], [1, 'standard', 53, 4, 1, 1],
 ])('serializes the full Scan preset for format %i, %s', async (format, mode, profile, q, session, focus) => {
@@ -131,7 +150,7 @@ it.each([
   await pending;
   expect(captured.commandPending).toBe(false);
 });
-it('reads GLP first on every reconnect and waits for each setting response before the next request', async () => {
+it('queries mode before RF settings on reconnect, then reads GLP before other settings', async () => {
   const replies = [
     { cmd: 'GLP', val: 13, format: 2 }, { cmd: 'DI', val: 'NHR-10' }, { cmd: 'GP', val: 20 },
     { cmd: 'GQS', val: '6,255' }, { cmd: 'GQP', val: '30,2,0' }, { cmd: 'GTF', val: 1 }, { cmd: 'GF', status: 'ok', val: 'US', band: 2, min_ch: 0, max_ch: 49, start_khz: 902750, end_khz: 927250, count: 50, step_khz: 500 },
@@ -139,8 +158,10 @@ it('reads GLP first on every reconnect and waits for each setting response befor
   for (let revision = 1; revision <= 2; revision++) {
     mocks.connection.status = 'disconnected'; await act(async () => root.render(<App />));
     mocks.connection.status = 'connected'; mocks.connection.connectionRevision = revision;
-    const before = mocks.ble.sendCommand.mock.calls.length;
     await act(async () => root.render(<App />));
+    expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: 'GTI' });
+    const before = mocks.ble.sendCommand.mock.calls.length;
+    await settingsReply(insuranceOff);
     for (let index = 0; index < replies.length; index++) {
       expect(mocks.ble.sendCommand).toHaveBeenCalledTimes(before + index + 1);
       expect(mocks.ble.sendCommand).toHaveBeenLastCalledWith({ cmd: replies[index].cmd });
