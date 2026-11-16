@@ -10,6 +10,7 @@ import { useSettingsActions } from './hooks/useSettingsActions';
 import { recoveryMessage, responseTimeoutMs } from './utils/revbProtocol';
 import { SettingsRequest } from './utils/settingsProtocol';
 import { parseProfileFormat, presetProfileId } from './utils/rfLinkProfile';
+import { useTagInsurance } from './hooks/useTagInsurance';
 
 const DEFAULT_BATCH_SAVE_INFO: BatchSaveInfo = {
   state: 'idle',
@@ -31,6 +32,7 @@ const App: React.FC = () => {
   const scan = useScanLogic(connection.addLog);
   const locate = useLocateLogic(connection.addLog);
   const fileTransfer = useFileTransfer(connection.addLog);
+  const insurance = useTagInsurance(connection.status, connection.connectionRevision ?? 0);
 
   // --- Operation State (Write) ---
   const [writeStatus, setWriteStatus] = useState<WriteStatus>('idle');
@@ -44,9 +46,10 @@ const App: React.FC = () => {
   const isBatchSaving = batchSaveInfo.state === 'saving';
   const settingsActions = useSettingsActions(connection.addLog, connection.status, undefined, connection.invalidateProfile, connection.updateRegionStatus);
 
-  useEffect(() => { connection.setConfigurationActive?.(settingsActions.activity !== null); }, [connection.setConfigurationActive, settingsActions.activity]);
+  useEffect(() => { connection.setConfigurationActive?.(settingsActions.activity !== null || insurance.locked); }, [connection.setConfigurationActive, settingsActions.activity, insurance.locked]);
 
   const runOperation = async (action: () => Promise<void>, startsRf = false) => {
+    if (insurance.isLocked()) return;
     if (startsRf && settingsActions.isRfRecoveryRequired()) {
       connection.addLog(recoveryMessage, 'error', { id: 'rfid-recovery', title: 'Reader recovery required' });
       return;
@@ -124,6 +127,7 @@ const App: React.FC = () => {
 
   // --- Unified Data Handler ---
 const handleDataReceived = useCallback((data: any) => {
+    if (insurance.handleDataReceived(data)) { connection.handleDataReceived(data); return; }
     const handledSettingsReply = settingsActions.handleDataReceived(data);
     // 1. Dữ liệu hệ thống (Pin, Info, Settings) luôn được cho phép xử lý
     connection.handleDataReceived(data);
@@ -187,7 +191,7 @@ const handleDataReceived = useCallback((data: any) => {
     if (['GF', 'SF'].includes(data.cmd) && data.status === 'err' && !handledSettingsReply) {
       connection.addLog(`Region response: ${data.error ?? data.msg ?? data.code ?? 'unknown_error'}`, 'error');
     }
-  }, [connection, scan, locate, markBatchSaving, clearBatchSaving, finishWrite, settingsActions.handleDataReceived]);
+  }, [connection, scan, locate, markBatchSaving, clearBatchSaving, finishWrite, settingsActions.handleDataReceived, insurance.handleDataReceived]);
 
   useEffect(() => {
     if (fileTransfer.transferStatus === 'saving') {
@@ -244,10 +248,11 @@ const handleDataReceived = useCallback((data: any) => {
     ], { silent: true, continueOnReadError: true });
   }, [settingsActions.runSequence]);
   useEffect(() => {
-    if (connection.status !== 'connected' || !connection.connectionRevision || synchronizedRevision.current === connection.connectionRevision || settingsActions.isPending()) return;
+    if (insurance.locked) { synchronizedRevision.current = 0; return; }
+    if (connection.status !== 'connected' || !connection.connectionRevision || synchronizedRevision.current === connection.connectionRevision || settingsActions.isPending() || insurance.isLocked()) return;
     synchronizedRevision.current = connection.connectionRevision;
     void refreshSettings();
-  }, [connection.status, connection.connectionRevision, refreshSettings, settingsActions.activity, settingsActions.isPending]);
+  }, [connection.status, connection.connectionRevision, refreshSettings, settingsActions.activity, settingsActions.isPending, insurance.locked, insurance.isLocked]);
 
   const handleRefreshSettings = async () => {
     await runOperation(async () => {
@@ -261,9 +266,10 @@ const handleDataReceived = useCallback((data: any) => {
   // --- Handlers ---
 
   const handleSettingsAction = useCallback((request: SettingsRequest) => {
+    if (insurance.isLocked()) return;
     if (commandPendingRef.current || pendingWriteRef.current !== null || scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
     return settingsActions.run(request).then(() => undefined);
-  }, [scan.isScanning, locate.isLocating, isBatchSaving, fileTransfer.isFileTransferring, settingsActions.run]);
+  }, [scan.isScanning, locate.isLocating, isBatchSaving, fileTransfer.isFileTransferring, settingsActions.run, insurance.isLocked]);
 
   const handleApplyPreset = async (mode: 'standard' | 'quick' | 'deep') => {
     if (scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) throw new Error('Stop the current operation before applying a preset.');
@@ -280,6 +286,7 @@ const handleDataReceived = useCallback((data: any) => {
   };
 
   const writeTag = async (action: () => Promise<void>) => {
+    if (insurance.isLocked()) return;
     if (settingsActions.isRfRecoveryRequired()) {
       connection.addLog(recoveryMessage, 'error', { id: 'rfid-recovery', title: 'Reader recovery required' });
       return;
@@ -310,7 +317,7 @@ const handleDataReceived = useCallback((data: any) => {
         exportedAt: new Date().toISOString(),
         connectionStatus: connection.status,
         device: connection.settings,
-        operation: { scanType: scan.activeScanType, locating: locate.isLocating, batchSave: batchSaveInfo },
+        operation: { scanType: scan.activeScanType, locating: locate.isLocating, batchSave: batchSaveInfo, insurance: insurance.snapshot, insuranceConfig: insurance.config },
         environment: { userAgent: navigator.userAgent, secureContext: window.isSecureContext, webBluetooth: 'bluetooth' in navigator },
         logs: connection.logs,
       };
@@ -329,6 +336,7 @@ const handleDataReceived = useCallback((data: any) => {
   };
 
   const handleShowPopup = async (content: string, time: number, beep: boolean) => {
+    if (insurance.isLocked()) return;
     try {
       await bleService.showPopup(content, time, beep);
       connection.addLog(`Popup sent: ${content}`, 'info');
@@ -337,8 +345,15 @@ const handleDataReceived = useCallback((data: any) => {
     }
   };
 
+  const setInsuranceMode: typeof insurance.setMode = async (enabled, config) => {
+    if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() ||
+        scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
+    await insurance.setMode(enabled, config);
+  };
+
   return (
     <DashboardLayout
+      insurance={{ ...insurance, setMode: setInsuranceMode }}
       status={connection.status}
       settings={connection.settings}
       tags={scan.tags}
@@ -394,6 +409,7 @@ const handleDataReceived = useCallback((data: any) => {
       
       onDownloadLogs={handleDownloadLogs}
       onFetchHistory={() => {
+        if (insurance.isLocked()) return;
         if (isBatchSaving) {
           connection.addLog('Batch data is still saving on device. Fetch is temporarily disabled.', 'info');
           return;
