@@ -42,7 +42,8 @@ export function assertCompatible(pkg: OtaPackage, info: OtaInfo, transport: OtaT
   if (info.product !== 'NHR10-B' || info.hw !== 'REV-B' || info.protocol !== 1 || info.project !== pkg.project || pkg.size > info.slot_size)
     throw new Error('Package is incompatible with the device model, hardware, project or update slot.');
   if (info.charge_only !== false) throw new Error('Start normal device operation, then reconnect before updating.');
-  if (info.ready !== true || info.pending !== false) throw new Error('Wait for device startup checks to finish, then prepare the update again.');
+  if (info.pending !== false) throw new Error('The installed firmware is still awaiting startup confirmation. Wait for confirmation or rollback, then prepare the update again.');
+  if (info.ready !== true) throw new Error('Device is not ready for OTA. Finish startup, turn off Tag Insurance and read RF power again. If RFID reports transport_desynchronized, fully power-cycle the reader and controller together, then check RFID before retrying.');
   if (!info.ota.split(',').map(s => s.trim()).includes(transport))
     throw new Error(`This firmware does not support ${transport.toUpperCase()} OTA. Select a supported transport.`);
   if (!valid(info.fw)) throw new Error('Installed firmware version is not valid semver. Check device firmware support.');

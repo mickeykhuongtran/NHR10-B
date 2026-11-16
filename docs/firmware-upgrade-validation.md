@@ -3,6 +3,28 @@
 Recorded on 2026-11-16 for the local implementation in
 `D:/Firmware-Develop/NHR10-APP/NHR10-APP-VERSION-B`.
 
+## Readiness failure follow-up (2026-11-16)
+
+The supplied `nhr10_ota_1794828359753.json` failed before transfer (zero bytes),
+targeting 1.2.0-dev.1. Installed Info was absent because compatibility checking
+threw before the diagnostic event was recorded. The client now retains sanitized
+Info before that check and distinguishes pending trial confirmation from general
+not-ready status. No firmware write or safety gate is bypassed.
+
+Validation: 396 tests passed across 23 files (one optional real-package test
+skipped), TypeScript and production build passed. Chrome ran 10 scenarios using
+the actual 1.2.0 package, including both pending/nonpending preflight failures.
+Those cases downloaded and parsed the diagnostic JSON, verified installed
+version/readiness/pending fields and proved zero OTA writes. All ten scenarios
+passed with no page errors. Logs: `.ota-readiness-*.log`; browser results:
+`test-results/ota/results.json`. The Bluetooth peripheral was simulated; this
+does not establish the cause of the physical reader's RFID timeout.
+
+The corresponding firmware 1.2.1 correction replaces a permanently cached boot
+RFID health result with a snapshot restored only by a fresh validated GP read.
+An RFID transport still in quarantine remains blocked and may need a full
+reader/controller power cycle. Earlier baseline evidence below is unchanged.
+
 ## Scope and environment
 
 The VER-C web project at `../nw-ble-handheld-main` supplied the BLE protocol-v1

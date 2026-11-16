@@ -65,6 +65,17 @@ it('rejects a different canonical identity when DI provided one', async () => {
   expect(service.state.stage).toBe('failed'); expect(service.state.message).toMatch(/same device/);
   expect(session.release).toHaveBeenCalledExactlyOnceWith(false);
 });
+it.each([{ ready: false, pending: false }, { ready: false, pending: true }])('retains device diagnostics when preflight rejects %j without writing firmware', async change => {
+  info = { ...info, ...change, fw: '1.2.0' };
+  await service.prepare(pkg, 'ble', false, coordination);
+  expect(service.state.stage).toBe('failed');
+  expect(service.state.message).toMatch(change.pending ? /startup confirmation/ : /read RF power/);
+  const diagnostics = service.diagnostics();
+  expect(diagnostics.state.info).toMatchObject({ fw: '1.2.0', ...change });
+  expect(diagnostics.events.find(e => e.event === 'installed-info')?.detail).toMatchObject({ fw: '1.2.0', ...change });
+  expect(writes).not.toHaveBeenCalled();
+  expect(session.release).toHaveBeenCalledExactlyOnceWith(false);
+});
 it('cancels while draining the BLE queue without opening a transport or leaking the lease', async () => {
   let finish!: (session: any) => void;
   ble.acquireOtaSession.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));

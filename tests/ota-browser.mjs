@@ -102,6 +102,23 @@ try {
   assert.equal(await cancel.evaluate(() => __otaFixture.writes.some(w => w.op === 4)), false);
   results.push({ case: 'cancel while waiting for durable DATA ACK, no FINISH', result: 'PASS' }); await cancel.close();
 
+  for (const pending of [false, true]) {
+    const blocked = await setup();
+    await blocked.evaluate(pending => { __otaFixture.info.ready = false; __otaFixture.info.pending = pending; }, pending);
+    await blocked.getByRole('button', { name: 'Prepare & review' }).click();
+    await blocked.getByText(pending ? /awaiting startup confirmation/ : /read RF power again/).waitFor();
+    const downloading = blocked.waitForEvent('download');
+    await blocked.getByRole('button', { name: 'Download diagnostics' }).click();
+    const downloaded = await downloading;
+    const diagnostic = JSON.parse(await readFile(await downloaded.path(), 'utf8'));
+    assert.equal(diagnostic.state.info.ready, false);
+    assert.equal(diagnostic.state.info.pending, pending);
+    assert.equal(diagnostic.state.info.fw, '1.2.0-dev.0');
+    assert.ok(diagnostic.events.some(e => e.event === 'installed-info'));
+    assert.equal(await blocked.evaluate(() => __otaFixture.writes.length), 0);
+    results.push({ case: `preflight blocked, pending=${pending}, downloaded device diagnostics, no OTA writes`, result: 'PASS' });
+    await blocked.close();
+  }
   const legacy = await setup({ legacyFirmware: true });
   await legacy.getByRole('button', { name: 'Prepare & review' }).click();
   await legacy.getByText(/Install the OTA-enabled REV-B application and bootloader/).waitFor();

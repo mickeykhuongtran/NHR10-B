@@ -182,11 +182,13 @@ export class FirmwareUpdateService {
       const info = await transport.open();
       if (this.cancelRequested) throw new Error('Cancelled');
       if (this.session.canonicalId && this.session.canonicalId !== info.id) throw new Error('Selected updater is not the reader connected to the controller. Select the same device.');
+      // Retain the device's actual readiness/version even when preflight fails.
+      this.log('installed-info', safeInfo(info));
+      this.set({ info });
       assertCompatible(pkg, info, kind, allowDowngrade);
       const status = await this.transport.status();
       if ([1, 2, 3].includes(status.state)) throw new OtaDeviceError(2);
       this.reviewedInfo = info;
-      this.log('installed-info', safeInfo(info));
       this.set({ stage: 'review', info, message: 'Review and confirm installation' });
     } catch (error) { await this.fail(error); }
   }
