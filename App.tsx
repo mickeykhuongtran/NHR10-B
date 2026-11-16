@@ -11,6 +11,7 @@ import { recoveryMessage, responseTimeoutMs } from './utils/revbProtocol';
 import { SettingsRequest } from './utils/settingsProtocol';
 import { parseProfileFormat, presetProfileId } from './utils/rfLinkProfile';
 import { useTagInsurance } from './hooks/useTagInsurance';
+import { useFirmwareUpdate } from './hooks/useFirmwareUpdate';
 
 const DEFAULT_BATCH_SAVE_INFO: BatchSaveInfo = {
   state: 'idle',
@@ -48,8 +49,20 @@ const App: React.FC = () => {
 
   useEffect(() => { connection.setConfigurationActive?.(settingsActions.activity !== null || insurance.locked); }, [connection.setConfigurationActive, settingsActions.activity, insurance.locked]);
 
+  const firmware = useFirmwareUpdate({
+    assertIdle: () => {
+      if (connection.status !== 'connected') throw new Error('Connect the reader before preparing firmware.');
+      if (insurance.isLocked()) throw new Error('Turn off Tag Insurance and wait for its status before updating firmware.');
+      if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() ||
+          scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring)
+        throw new Error('Stop scanning or finding and finish saving, writing or transferring data before preparing firmware.');
+    },
+    pause: connection.beginFirmwareUpdate,
+    resume: connection.endFirmwareUpdate,
+  });
+
   const runOperation = async (action: () => Promise<void>, startsRf = false) => {
-    if (insurance.isLocked()) return;
+    if (firmware.isActive() || insurance.isLocked()) return;
     if (startsRf && settingsActions.isRfRecoveryRequired()) {
       connection.addLog(recoveryMessage, 'error', { id: 'rfid-recovery', title: 'Reader recovery required' });
       return;
@@ -248,6 +261,7 @@ const handleDataReceived = useCallback((data: any) => {
     ], { silent: true, continueOnReadError: true });
   }, [settingsActions.runSequence]);
   useEffect(() => {
+    if (firmware.isActive()) return;
     if (insurance.locked) { synchronizedRevision.current = 0; return; }
     if (connection.status !== 'connected' || !connection.connectionRevision || synchronizedRevision.current === connection.connectionRevision || settingsActions.isPending() || insurance.isLocked()) return;
     synchronizedRevision.current = connection.connectionRevision;
@@ -266,7 +280,7 @@ const handleDataReceived = useCallback((data: any) => {
   // --- Handlers ---
 
   const handleSettingsAction = useCallback((request: SettingsRequest) => {
-    if (insurance.isLocked()) return;
+    if (firmware.isActive() || insurance.isLocked()) return;
     if (commandPendingRef.current || pendingWriteRef.current !== null || scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
     return settingsActions.run(request).then(() => undefined);
   }, [scan.isScanning, locate.isLocating, isBatchSaving, fileTransfer.isFileTransferring, settingsActions.run, insurance.isLocked]);
@@ -286,7 +300,7 @@ const handleDataReceived = useCallback((data: any) => {
   };
 
   const writeTag = async (action: () => Promise<void>) => {
-    if (insurance.isLocked()) return;
+    if (firmware.isActive() || insurance.isLocked()) return;
     if (settingsActions.isRfRecoveryRequired()) {
       connection.addLog(recoveryMessage, 'error', { id: 'rfid-recovery', title: 'Reader recovery required' });
       return;
@@ -336,7 +350,7 @@ const handleDataReceived = useCallback((data: any) => {
   };
 
   const handleShowPopup = async (content: string, time: number, beep: boolean) => {
-    if (insurance.isLocked()) return;
+    if (firmware.isActive() || insurance.isLocked()) return;
     try {
       await bleService.showPopup(content, time, beep);
       connection.addLog(`Popup sent: ${content}`, 'info');
@@ -346,6 +360,7 @@ const handleDataReceived = useCallback((data: any) => {
   };
 
   const setInsuranceMode: typeof insurance.setMode = async (enabled, config) => {
+    if (firmware.isActive()) return;
     if (commandPendingRef.current || pendingWriteRef.current !== null || settingsActions.isPending() ||
         scan.isScanning || locate.isLocating || isBatchSaving || fileTransfer.isFileTransferring) return;
     await insurance.setMode(enabled, config);
@@ -353,7 +368,8 @@ const handleDataReceived = useCallback((data: any) => {
 
   return (
     <DashboardLayout
-      insurance={{ ...insurance, setMode: setInsuranceMode }}
+      firmware={firmware}
+      insurance={{ ...insurance, setMode: setInsuranceMode, query: async () => { if (!firmware.isActive()) await insurance.query(); } }}
       status={connection.status}
       settings={connection.settings}
       tags={scan.tags}
@@ -364,8 +380,9 @@ const handleDataReceived = useCallback((data: any) => {
       settingsActivity={settingsActions.activity}
       onSettingsAction={handleSettingsAction}
       
-      onConnect={connection.connect}
+      onConnect={() => { if (!firmware.isActive()) void connection.connect(); }}
       onDisconnect={() => {
+        if (firmware.isActive()) return;
         connection.disconnect();
         scan.resetScanSession();
         locate.resetLocateState();
@@ -409,7 +426,7 @@ const handleDataReceived = useCallback((data: any) => {
       
       onDownloadLogs={handleDownloadLogs}
       onFetchHistory={() => {
-        if (insurance.isLocked()) return;
+        if (firmware.isActive() || insurance.isLocked()) return;
         if (isBatchSaving) {
           connection.addLog('Batch data is still saving on device. Fetch is temporarily disabled.', 'info');
           return;

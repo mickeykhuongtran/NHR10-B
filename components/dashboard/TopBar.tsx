@@ -15,7 +15,7 @@ interface TopBarProps {
 export const TopBar: React.FC<TopBarProps> = ({ status, settings, onConnect, onDisconnect }) => {
   const connected = status === 'connected';
   const name = settings.deviceName || formatDeviceDisplayName('', undefined, settings.deviceInfo) || 'NHR-10';
-  const statusLabel = connected ? 'Connected' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Connection failed' : 'Not connected';
+  const statusLabel = status === 'updating' ? 'Updating firmware' : connected ? 'Connected' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Connection failed' : 'Not connected';
   const supported = typeof navigator !== 'undefined' && 'bluetooth' in navigator && window.isSecureContext;
 
   return (
@@ -33,8 +33,8 @@ export const TopBar: React.FC<TopBarProps> = ({ status, settings, onConnect, onD
         {connected && (
           <BatteryIndicator snapshot={settings.batterySnapshot} connected={connected} />
         )}
-        <Button variant={connected ? 'outline' : 'primary'} size="sm" onClick={connected ? onDisconnect : onConnect} disabled={status === 'connecting' || (!connected && !supported)} title={!supported ? 'Use a browser with Web Bluetooth over HTTPS or localhost.' : undefined}>
-          {connected ? 'Disconnect' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Try again' : 'Connect device'}
+        <Button variant={connected ? 'outline' : 'primary'} size="sm" onClick={connected ? onDisconnect : onConnect} disabled={status === 'updating' || status === 'connecting' || (!connected && !supported)} title={!supported ? 'Use a browser with Web Bluetooth over HTTPS or localhost.' : undefined}>
+          {status === 'updating' ? 'Updating…' : connected ? 'Disconnect' : status === 'connecting' ? 'Connecting…' : status === 'error' ? 'Try again' : 'Connect device'}
         </Button>
       </div>
     </header>

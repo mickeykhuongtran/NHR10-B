@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown } from 'lucide-react';
+import { ChevronDown, Upload } from 'lucide-react';
+import type { FirmwareUpdate } from '../../hooks/useFirmwareUpdate';
+import { FirmwareUpgradeTab } from './FirmwareUpgradeTab';
 import { useNotifications } from '../../hooks/useNotifications';
 import { SettingsActivity } from '../../hooks/useSettingsActions';
 import { SettingsRequest } from '../../utils/settingsProtocol';
@@ -18,6 +20,7 @@ import type { TagInsuranceController } from '../../hooks/useTagInsurance';
 import { BatchSaveInfo, Settings, ConnectionStatus, Tag, LogEntry, ScanStats, FileTransferStatus, LocateSignalState } from '../../types';
 
 interface DashboardLayoutProps {
+  firmware?: FirmwareUpdate;
   insurance?: TagInsuranceController;
   status: ConnectionStatus;
   settings: Settings;
@@ -84,17 +87,19 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
     { id: 3, label: 'Write EPC', detail: 'Program a tag' },
     { id: 6, label: 'Saved data', detail: 'Batch inventory & export' },
   ];
-  const moreTabs = [{ id: 7, label: 'Tag Insurance' }, { id: 4, label: 'Device settings' }, { id: 5, label: 'Diagnostics' }];
+  const moreTabs = [{ id: 8, label: 'Upgrade firmware' }, { id: 7, label: 'Tag Insurance' }, { id: 4, label: 'Device settings' }, { id: 5, label: 'Diagnostics' }];
   const isMoreTabActive = moreTabs.some(tab => tab.id === activeTab);
   const mainRef = useRef<HTMLElement>(null);
   useEffect(() => { mainRef.current?.focus({ preventScroll: true }); }, [activeTab]);
+  const updating = props.firmware?.state.active ?? false;
   const insuranceLocked = props.status === 'connected' && (props.insurance?.locked ?? false);
-  const deviceBusy = props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null || insuranceLocked;
+  const deviceBusy = updating || props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null || insuranceLocked;
   const operationActive = props.isScanning || props.isLocating || props.isBatchSaving || deviceBusy;
-  const operationLabel = props.settingsActivity ? `${props.settingsActivity.phase} ${props.settingsActivity.title}…` : props.commandPending ? 'Waiting for device command…' : props.writeStatus === 'pending' ? 'Waiting for write confirmation…' : props.isBatchSaving ? 'Saving batch data on device…' : props.isFileTransferring ? 'Downloading saved data…' : props.isLocating ? 'Finding a tag' : props.isScanning ? (props.activeScanType === 'batch' ? 'Batch scan in progress' : 'Live scan in progress') : props.status === 'connected' ? 'Device ready' : props.status === 'connecting' ? 'Connecting to the reader…' : 'Connect your reader to begin';
+  const operationLabel = updating ? 'Firmware update in progress · Device controls paused' : props.settingsActivity ? `${props.settingsActivity.phase} ${props.settingsActivity.title}…` : props.commandPending ? 'Waiting for device command…' : props.writeStatus === 'pending' ? 'Waiting for write confirmation…' : props.isBatchSaving ? 'Saving batch data on device…' : props.isFileTransferring ? 'Downloading saved data…' : props.isLocating ? 'Finding a tag' : props.isScanning ? (props.activeScanType === 'batch' ? 'Batch scan in progress' : 'Live scan in progress') : props.status === 'connected' ? 'Device ready' : props.status === 'connecting' ? 'Connecting to the reader…' : 'Connect your reader to begin';
   const showStop = (props.isLocating && activeTab !== 2) || (props.isScanning && activeTab !== 1);
 
   const selectTab = (tabId: number) => {
+    if (updating && tabId !== 8) return;
     setActiveTab(tabId);
     setMobileMoreOpen(false);
   };
@@ -115,7 +120,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
           <div className="hidden px-6 pb-3 pt-7 lg:block"><p className="eyebrow">Workspace</p></div>
           <nav aria-label="Main navigation" className="flex justify-around px-1 py-1 lg:block lg:space-y-1 lg:px-3 lg:py-0" style={{ paddingBottom: 'max(4px, env(safe-area-inset-bottom))' }}>
             {tabs.map((tab, index) => (
-              <button key={tab.id} onClick={() => selectTab(tab.id)} aria-current={activeTab === tab.id ? 'page' : undefined} className="nav-item !w-auto !flex-1 !justify-center !px-2 !text-[13px] lg:!w-full lg:!justify-start lg:!px-3 lg:!text-sm">
+              <button key={tab.id} disabled={updating} onClick={() => selectTab(tab.id)} aria-current={activeTab === tab.id ? 'page' : undefined} className="nav-item !w-auto !flex-1 !justify-center !px-2 !text-[13px] lg:!w-full lg:!justify-start lg:!px-3 lg:!text-sm">
                 <span className="nav-number hidden lg:block">0{index + 1}</span><span>{tab.label}</span>
               </button>
             ))}
@@ -123,12 +128,13 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
           </nav>
           {mobileMoreOpen && <nav id="mobile-tools" aria-label="Engineering tools" className="absolute bottom-full right-3 mb-2 w-56 rounded-xl border border-slate-200 bg-white p-2 shadow-lg lg:hidden">
             <p className="eyebrow px-3 py-2">Advanced</p>
-            {moreTabs.map(tab => <button key={tab.id} className="nav-item" aria-current={activeTab === tab.id ? 'page' : undefined} onClick={() => selectTab(tab.id)}>{tab.label}</button>)}
+            {moreTabs.map(tab => <button key={tab.id} disabled={updating && tab.id !== 8} className="nav-item" aria-current={activeTab === tab.id ? 'page' : undefined} onClick={() => selectTab(tab.id)}>{tab.label}</button>)}
           </nav>}
           <div className="mt-8 hidden border-t border-slate-100 px-3 pt-4 lg:block">
+            <button className="nav-item mb-2" aria-current={activeTab === 8 ? 'page' : undefined} onClick={() => selectTab(8)}><Upload size={16} />Upgrade firmware</button>
             <button className="nav-item justify-between" onClick={() => setAdvancedOpen(!advancedOpen)} aria-expanded={advancedOpen || isMoreTabActive} aria-controls="advanced-navigation">Advanced<ChevronDown size={15} className={advancedOpen || isMoreTabActive ? 'rotate-180' : ''} /></button>
             {(advancedOpen || isMoreTabActive) && <nav id="advanced-navigation" aria-label="Engineering tools">
-              {moreTabs.map(tab => <button key={tab.id} className="nav-item pl-6" aria-current={activeTab === tab.id ? 'page' : undefined} onClick={() => selectTab(tab.id)}>{tab.label}</button>)}
+              {moreTabs.filter(tab => tab.id !== 8).map(tab => <button key={tab.id} disabled={updating} className="nav-item pl-6" aria-current={activeTab === tab.id ? 'page' : undefined} onClick={() => selectTab(tab.id)}>{tab.label}</button>)}
               <p className="px-3 py-2 text-xs leading-5 text-slate-400">RF configuration and service diagnostics.</p>
             </nav>}
           </div>
@@ -136,10 +142,13 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
         </aside>
         <div className="order-1 flex min-h-0 min-w-0 flex-1 flex-col lg:order-2">
           <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 text-xs text-slate-500 sm:px-6 sm:text-sm" aria-label="Device activity">
-            <span role="status" className={`min-w-0 line-clamp-2 ${operationActive || props.isFileTransferring ? 'text-blue-700' : ''}`}>{insuranceLocked ? (props.insurance?.snapshot?.enabled ? 'Tag Insurance · RF controls reserved. Open More → Tag Insurance.' : 'Checking device mode… Open More → Tag Insurance.') : operationLabel}</span>
+            <span role="status" className={`min-w-0 line-clamp-2 ${operationActive || props.isFileTransferring ? 'text-blue-700' : ''}`}>{updating ? operationLabel : insuranceLocked ? (props.insurance?.snapshot?.enabled ? 'Tag Insurance · RF controls reserved. Open More → Tag Insurance.' : 'Checking device mode… Open More → Tag Insurance.') : operationLabel}</span>
             <Button className={`w-[112px] shrink-0 !px-2 ${showStop ? '' : 'invisible'}`} variant="outline" size="sm" disabled={!showStop || props.isBatchSaving || deviceBusy} tabIndex={showStop ? 0 : -1} aria-hidden={!showStop} onClick={props.isLocating ? props.onStopLocate : props.activeScanType === 'batch' ? props.onStopBatch : props.onStopScan}>Stop {props.isLocating ? 'finding' : 'scan'}</Button>
           </div>
           <main id="main-content" ref={mainRef} tabIndex={-1} className="relative min-h-0 min-w-0 flex-1 overflow-hidden outline-none">
+          {activeTab === 8 && props.firmware && <FirmwareUpgradeTab firmware={props.firmware} status={props.status} settings={props.settings}
+            operationBusy={props.isScanning || props.isLocating || props.isBatchSaving || props.isFileTransferring || props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null}
+            insuranceBlocked={insuranceLocked} onConnect={props.onConnect} />}
           {activeTab === 7 && props.insurance && <TagInsuranceTab controller={props.insurance} connected={props.status === 'connected'}
             busy={props.isScanning || props.isLocating || props.isBatchSaving || props.isFileTransferring || props.commandPending || props.writeStatus === 'pending' || props.settingsActivity !== null} />}
           {activeTab === 1 && (
@@ -222,7 +231,7 @@ export const DashboardLayout: React.FC<DashboardLayoutProps> = (props) => {
 
           {activeTab === 4 && (
             <SettingsTab 
-              isBusy={insuranceLocked || props.isScanning || props.isLocating || props.isBatchSaving || props.commandPending || props.writeStatus === 'pending' || props.isFileTransferring}
+              isBusy={updating || insuranceLocked || props.isScanning || props.isLocating || props.isBatchSaving || props.commandPending || props.writeStatus === 'pending' || props.isFileTransferring}
               activity={props.settingsActivity}
               onAction={props.onSettingsAction}
               settings={props.settings}

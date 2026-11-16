@@ -3,6 +3,7 @@ import { createRoot, Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useRFIDConnection } from '../hooks/useRFIDConnection';
 import { batteryView } from '../utils/battery';
+import { testInfo } from './ota-fixtures';
 
 const ble = vi.hoisted(() => Object.fromEntries([
   'connect', 'disconnect', 'getDeviceIdentity', 'getDeviceName', 'getDeviceInfo',
@@ -16,6 +17,27 @@ let connection: ReturnType<typeof useRFIDConnection>;
 const packet = { cmd: 'GB', ver: 2, voltage: 7500, state: 'NORMAL', load: 'idle', percent: 61.3, valid: true, charging: false, full: false, health: 0, age_ms: 0 };
 const receive = (overrides = {}) => act(() => connection.handleDataReceived({ ...packet, ...overrides }));
 const advance = async (ms: number) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); };
+
+it('pauses telemetry, watchdog and reconnect immediately for OTA, then refreshes controller state on release', async () => {
+  const revision = connection.connectionRevision;
+  const batteryReads = ble.getBattery.mock.calls.length, temperatureReads = ble.getTemperature.mock.calls.length;
+  act(() => {
+    connection.beginFirmwareUpdate();
+    document.dispatchEvent(new Event('visibilitychange'));
+    connection.handleConnectionStatusChange('disconnected');
+  });
+  expect(connection.status).toBe('updating');
+  await advance(30000);
+  expect(ble.getBattery).toHaveBeenCalledTimes(batteryReads);
+  expect(ble.getTemperature).toHaveBeenCalledTimes(temperatureReads);
+  expect(ble.recoverFromUnexpectedLinkTimeout).not.toHaveBeenCalled();
+  await act(async () => { await connection.connect(); connection.disconnect(); });
+  expect(ble.connect).toHaveBeenCalledOnce(); expect(ble.disconnect).not.toHaveBeenCalled();
+  await act(async () => connection.endFirmwareUpdate(true, testInfo));
+  expect(connection.status).toBe('connected'); expect(connection.connectionRevision).toBe(revision + 1);
+  expect(connection.settings).toMatchObject({ version: testInfo.fw, deviceCanonicalId: testInfo.id, linkProfileConfirmed: false });
+  expect(ble.getBattery).toHaveBeenCalledTimes(batteryReads + 1);
+});
 
 beforeEach(async () => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'] });

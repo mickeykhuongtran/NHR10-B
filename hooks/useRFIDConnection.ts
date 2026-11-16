@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { bleService } from '../services/bleService';
+import type { OtaInfo } from '../services/otaProtocol';
 import { ConnectionStatus, Settings, LogEntry, SettingsSyncRevision, RegionStatusUpdate } from '../types';
 import { BATTERY_POLL_INTERVAL_MS, isBatteryShutdown, isBatterySnapshotStale, parseBatterySnapshot } from '../utils/battery';
 import { isSettingsBusy, isSettingsError, parseSettingReading } from '../utils/settingsProtocol';
@@ -51,6 +52,7 @@ export const useRFIDConnection = () => {
   const inventoryModeRef = useRef<InventoryMode>('idle');
   const heartbeatTimeoutReportedRef = useRef(false);
   const configurationActiveRef = useRef(false);
+  const updatingRef = useRef(false);
   const setConfigurationActive = useCallback((active: boolean) => { configurationActiveRef.current = active; }, []);
   const [settings, setSettings] = useState<Settings>({
     power: 30,
@@ -150,7 +152,7 @@ export const useRFIDConnection = () => {
   }, [markDeviceActivity]);
 
   const markDeviceOffline = useCallback((reason = 'Device battery heartbeat timeout') => {
-    if (heartbeatTimeoutReportedRef.current) return;
+    if (updatingRef.current || heartbeatTimeoutReportedRef.current) return;
     if (bleService.isIntentionalUnpairPending()) return;
 
     heartbeatTimeoutReportedRef.current = true;
@@ -164,6 +166,7 @@ export const useRFIDConnection = () => {
   }, [addLog, clearDeviceTelemetry, resetConnectionTracking]);
 
   const handleDataReceived = useCallback((data: any) => {
+    if (updatingRef.current) return;
     markDeviceActivity();
 
     // 3. Settings Responses
@@ -287,6 +290,7 @@ export const useRFIDConnection = () => {
   }, [addLog, invalidateProfile, markBatteryHeartbeat, markDeviceActivity]);
 
   const handleConnectionStatusChange = useCallback((nextStatus: ConnectionStatus, reason?: string) => {
+    if (updatingRef.current) return;
     if (nextStatus === 'connecting') {
       clearDeviceTelemetry();
       setStatus('connecting');
@@ -317,6 +321,7 @@ export const useRFIDConnection = () => {
   }, [addLog, clearDeviceTelemetry, resetConnectionTracking]);
 
   const connect = async () => {
+    if (updatingRef.current) return;
     setStatus('connecting');
     heartbeatTimeoutReportedRef.current = false;
     const now = Date.now();
@@ -346,12 +351,16 @@ export const useRFIDConnection = () => {
       addLog(`Connected to ${identity?.canonicalId || 'NHR-10'}`, 'info');
       
       // DI and configuration reads run through App's settings coordinator.
+      if (updatingRef.current) return;
       await bleService.getInfo();
+      if (updatingRef.current) return;
       lastBatteryPollAtRef.current = performance.now();
       await bleService.getBattery();
+      if (updatingRef.current) return;
       await bleService.getTemperature();
 
     } catch (e: any) {
+      if (updatingRef.current) return;
       if (bleService.isIntentionalUnpairPending()) {
         addLog('Device unpair is in progress; waiting for peripheral disconnect.', 'info');
         return;
@@ -370,6 +379,7 @@ export const useRFIDConnection = () => {
   };
 
   const disconnect = () => {
+    if (updatingRef.current) return;
     heartbeatTimeoutReportedRef.current = true;
     resetConnectionTracking();
     bleService.disconnect();
@@ -384,7 +394,7 @@ export const useRFIDConnection = () => {
     if (status === 'connected') {
       let pending = false;
       const pollBattery = () => {
-        if (pending) return;
+        if (updatingRef.current || pending) return;
         pending = true;
         lastBatteryPollAtRef.current = performance.now();
         void bleService.getBattery()
@@ -414,7 +424,7 @@ export const useRFIDConnection = () => {
     if (status === 'connected') {
       if (inventoryMode === 'idle') {
         temperaturePollId = window.setInterval(() => {
-          if (!configurationActiveRef.current) void bleService.getTemperature().catch(e => console.error("Temp poll failed", e));
+          if (!updatingRef.current && !configurationActiveRef.current) void bleService.getTemperature().catch(e => console.error("Temp poll failed", e));
         }, TEMPERATURE_POLL_INTERVAL_MS);
       }
     }
@@ -428,6 +438,7 @@ export const useRFIDConnection = () => {
     if (status !== 'connected') return;
 
     const heartbeatCheckId = window.setInterval(() => {
+      if (updatingRef.current) return;
       const now = Date.now();
       const mode = inventoryModeRef.current;
       // Expire the gauge even during batch saving or continuous RFID traffic.
@@ -451,7 +462,22 @@ export const useRFIDConnection = () => {
     return () => window.clearInterval(heartbeatCheckId);
   }, [markDeviceOffline, status]);
 
+  const beginFirmwareUpdate = useCallback(() => {
+    updatingRef.current = true;
+    resetConnectionTracking();
+    invalidateProfile();
+    setStatus('updating');
+  }, [resetConnectionTracking, invalidateProfile]);
+
+  const endFirmwareUpdate = useCallback((connected: boolean, info?: OtaInfo) => {
+    updatingRef.current = false;
+    handleConnectionStatusChange(connected ? 'connected' : 'disconnected');
+    if (connected && info) setSettings(s => ({ ...s, version: info.fw, deviceCanonicalId: info.id }));
+  }, [handleConnectionStatusChange]);
+
   return {
+    beginFirmwareUpdate,
+    endFirmwareUpdate,
     status,
     connectionRevision,
     settings,

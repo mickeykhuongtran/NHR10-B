@@ -6,7 +6,7 @@ The goal is to make the repository easy to reuse: keep the stable device-control
 
 ## 1. System Scope
 
-The current web app handles 6 main functional areas:
+The current web app includes the following functional areas:
 
 | Area | Purpose | Main modules |
 |---|---|---|
@@ -16,8 +16,13 @@ The current web app handles 6 main functional areas:
 | Tag locating | Locate one target EPC using RSSI feedback | `hooks/useLocateLogic.ts` |
 | Tag writing | Write EPC or another memory bank | `App.tsx`, `services/bleService.ts` |
 | Reader configuration | Power, RF link profile, Q/session, query timing, Tag Focus, save config | `App.tsx`, `components/dashboard/SettingsTab.tsx` |
+| Firmware upgrade | REV-B package validation, BLE OTA, reboot/rollback confirmation | `components/dashboard/FirmwareUpgradeTab.tsx`, `services/firmwareUpdateService.ts` |
 
 The current UI is in `components/`. Device-control logic is mainly in `services/`, `hooks/`, `utils/`, and `types.ts`.
+
+For REV-B BLE firmware upgrades, open **Upgrade firmware** (desktop) or
+**More → Upgrade firmware** (mobile). See [the firmware upgrade guide](docs/firmware-upgrade.md)
+for local `.nhrota` files, first-installation requirements, optional releases and verification.
 
 ## 2. Running The Current Web App
 
@@ -81,7 +86,7 @@ For browser UI checks, run the development server and open `/tests/ui.html`. Thi
 4. Select `NHR-10`, the advertising name of the current REVB firmware. The transport also supports `NHR10-XXXXXX` and `Nextwaves` devices.
 5. The app connects to GATT, gets service `FF`, discovers characteristics `FF01`, `FF02`, and `FF03`, and starts notifications on `FF01`.
 6. The web client issues `DI` over `FF01`. Current REVB returns only `{"cmd":"DI","val":"NHR-10"}`; its recognized advertising name permits legacy compatibility mode without a Canonical ID. Firmware supplying a Canonical ID (`NHR10-` plus 12 hexadecimal MAC digits) is verified, including the suffix for a default `NHR10-XXXXXX` name. The client does not read the blocklisted Serial Number `0x2A25`.
-7. The app marks the transport ready and reads the current Bluetooth name, RFID module information, battery, power, link profile, Q/session, query params, Tag Focus, region, and temperature. REVB does not supply an ESP32 controller firmware version; Diagnostics displays it as unknown rather than reusing the RFID module version.
+7. The app marks the transport ready and reads the current Bluetooth name, RFID module information, battery, power, link profile, Q/session, query params, Tag Focus, region, and temperature. Legacy REVB DI does not supply an ESP32 controller firmware version; Diagnostics displays it as unknown rather than reusing the RFID module version. Preparing a firmware upgrade reads the handheld version and canonical identity from OTA Info on the same device, and refreshes those fields after startup confirmation.
 
 After connection, the app starts a heartbeat loop to verify that the device is still online. If the GATT link drops unexpectedly, the app invalidates the old GATT characteristics and makes five bounded reconnect attempts (0.5 s, 1 s, 2 s, 4 s, and 8 s delays) against the same browser-authorized device. Every successful reconnect rediscovers services/characteristics, re-enables notifications, revalidates identity through `DI`, and resynchronizes reader state. A user-requested disconnect never triggers automatic reconnect.
 

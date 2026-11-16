@@ -1,17 +1,18 @@
 import { ConnectionStatus } from '../types';
+import { OTA_UUID, withTimeout } from './otaProtocol';
 import { MAX_LOCATE_EPC_HEX, validHexWords, validateRevbWrite, validPopupContent } from '../utils/revbProtocol';
 import { prepareSettingApply } from '../utils/settingsProtocol';
 import { assertProfileId } from '../utils/rfLinkProfile';
 import { prepareRegionApply } from '../utils/regionBand';
 
 // --- Web Bluetooth Type Definitions ---
-interface BluetoothDevice extends EventTarget {
+export interface BluetoothDevice extends EventTarget {
   id: string;
   name?: string;
   gatt?: BluetoothRemoteGATTServer;
 }
 
-interface BluetoothRemoteGATTServer {
+export interface BluetoothRemoteGATTServer {
   device: BluetoothDevice;
   connected: boolean;
   connect(): Promise<BluetoothRemoteGATTServer>;
@@ -31,13 +32,21 @@ interface BluetoothCharacteristicProperties {
   indicate?: boolean;
 }
 
-interface BluetoothRemoteGATTCharacteristic extends EventTarget {
+export interface BluetoothRemoteGATTCharacteristic extends EventTarget {
   properties?: BluetoothCharacteristicProperties;
   value?: DataView;
   writeValue(value: BufferSource): Promise<void>;
   writeValueWithResponse?(value: BufferSource): Promise<void>;
   writeValueWithoutResponse?(value: BufferSource): Promise<void>;
   startNotifications(): Promise<BluetoothRemoteGATTCharacteristic>;
+  stopNotifications?(): Promise<BluetoothRemoteGATTCharacteristic>;
+  readValue?(): Promise<DataView>;
+}
+export interface OtaBleSession {
+  device: BluetoothDevice;
+  canonicalId: string | null;
+  getServer(): Promise<BluetoothRemoteGATTServer>;
+  release(resume: boolean): Promise<boolean>;
 }
 // --------------------------------------
 
@@ -110,6 +119,7 @@ type NhrbStartMetadata = {
 const wait = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms));
 
 class BLEService {
+  private otaToken: symbol | null = null;
   private device: BluetoothDevice | null = null;
   private server: BluetoothRemoteGATTServer | null = null;
   private service: BluetoothRemoteGATTService | null = null;
@@ -167,6 +177,7 @@ class BLEService {
   }
 
   async connect(): Promise<void> {
+    if (this.otaToken) throw new Error('Firmware update in progress.');
     const nav = navigator as any;
     if (!nav.bluetooth) {
       throw new Error('Web Bluetooth is not supported in this browser.');
@@ -203,7 +214,7 @@ class BLEService {
         { namePrefix: 'NHR-10' },
         { namePrefix: 'Nextwaves' },
       ],
-      optionalServices: [SERVICE_UUID],
+      optionalServices: [SERVICE_UUID, OTA_UUID.service],
     };
 
     try {
@@ -218,7 +229,7 @@ class BLEService {
       this.log('Retrying BLE request with iOS-compatible selector...', 'info');
       return nav.bluetooth.requestDevice({
         acceptAllDevices: true,
-        optionalServices: [SERVICE_UUID],
+        optionalServices: [SERVICE_UUID, OTA_UUID.service],
       });
     }
   }
@@ -271,6 +282,13 @@ class BLEService {
   private handleDisconnect(event: Event) {
     const disconnectedDevice = event.target as BluetoothDevice;
     if (disconnectedDevice !== this.device) return;
+    if (this.otaToken) {
+      this.shouldReconnect = false;
+      this.cancelScheduledReconnect();
+      this.clearGattState();
+      // The OTA owner handles expected reboot and same-device recovery.
+      return;
+    }
 
     const shouldAttemptReconnect = this.shouldReconnect;
     this.shouldReconnect = false;
@@ -480,12 +498,64 @@ class BLEService {
     return this.identity ? { ...this.identity } : null;
   }
 
+  isUpdating(): boolean { return this.otaToken !== null; }
+
+  /** Lend this connection; never open another picker or parallel GATT session. */
+  async acquireOtaSession(): Promise<OtaBleSession> {
+    if (this.otaToken) throw new Error('Another firmware update is already active.');
+    if (this.intentionalUnpair) throw new Error('Device unpair is in progress. Reconnect before updating.');
+    if (this.isFileTransferring) throw new Error('Finish the batch file transfer before updating.');
+    if (!this.device?.gatt?.connected || this.pendingIdentityVerification) throw new Error('Connect the reader and finish initialization before updating.');
+    const token = Symbol('ota');
+    const device = this.device;
+    const canonicalId = this.identity?.canonicalId ?? null;
+    const draining = this.commandQueue;
+    this.otaToken = token;
+    this.shouldReconnect = false;
+    ++this.reconnectGeneration;
+    this.cancelScheduledReconnect();
+    ++this.commandQueueGeneration;
+    this.suspendLiveTags();
+    try {
+      // REVB's queue resolves only after the physical GATT operation. Cancel
+      // queued work, then let the current ATT write finish before OTA discovery.
+      await withTimeout(draining.catch(() => undefined), 10000, 'RFID command did not finish. Reconnect before updating.', () => this.disconnect());
+      if (device && (this.device !== device || !device.gatt?.connected)) throw new Error('Reader disconnected while preparing OTA. Reconnect.');
+    } catch (error) {
+      this.otaToken = null;
+      this.disconnect();
+      throw error;
+    }
+    let released = false;
+    return {
+      device, canonicalId,
+      getServer: async () => {
+        if (released || this.otaToken !== token || !device?.gatt || this.device !== device) throw new Error('BLE OTA session is no longer available.');
+        const server = device.gatt.connected ? device.gatt : await device.gatt.connect();
+        if (released || this.otaToken !== token) { server.disconnect(); throw new Error('BLE OTA session retired.'); }
+        return server;
+      },
+      release: async (resume) => {
+        if (released) return false;
+        released = true;
+        if (this.otaToken !== token) return false;
+        this.otaToken = null;
+        if (!resume || !device || this.device !== device || !device.gatt?.connected) { this.disconnect(); return false; }
+        try {
+          if (!this.charCmd) await withTimeout(this.connectGatt(true, this.reconnectGeneration), 10000, 'RFID reconnect timed out.', () => this.disconnect());
+          this.shouldReconnect = true;
+          return true;
+        } catch { this.disconnect(); return false; }
+      },
+    };
+  }
+
   isIntentionalUnpairPending(): boolean {
     return this.intentionalUnpair;
   }
 
   recoverFromUnexpectedLinkTimeout(reason = 'BLE link timeout'): boolean {
-    if (this.intentionalUnpair || !this.shouldReconnect || !this.device?.gatt) return false;
+    if (this.otaToken || this.intentionalUnpair || !this.shouldReconnect || !this.device?.gatt) return false;
 
     this.log(`${reason}; restarting the bounded reconnect policy.`, 'error');
     if (this.device.gatt.connected) {
@@ -640,9 +710,12 @@ class BLEService {
       const data = JSON.parse(value);
 
       if (data?.cmd === 'UQ' && data?.v === 1) {
+        if (this.otaToken) { this.device?.gatt?.disconnect(); return; }
         this.handleDeviceUnpairRequest(data, value);
         return;
       }
+
+      if (this.otaToken) return;
 
       if (data.cmd === 'DI') {
         const hasPendingVerification = this.pendingIdentityVerification !== null;
@@ -1189,6 +1262,7 @@ class BLEService {
 
   // Queue commands to ensure they are serialized
   async sendCommand(command: object): Promise<void> {
+    if (this.otaToken) throw new Error('Firmware update in progress; RFID commands are paused.');
     if (!this.charCmd) throw new Error('Not connected');
     if (this.intentionalUnpair) return;
     
@@ -1204,11 +1278,13 @@ class BLEService {
   }
 
   private enqueueGattOperation(operation: () => Promise<void>): Promise<void> {
+    if (this.otaToken) return Promise.reject(new Error('Firmware update in progress; device controls are paused.'));
     const queueGeneration = this.commandQueueGeneration;
 
     // Append to queue. Recover from previous write failures so reconnects are not poisoned.
     this.commandQueue = this.commandQueue.catch(() => undefined).then(async () => {
       try {
+        if (this.otaToken) throw new Error('Firmware update starting; queued device command cancelled.');
         if (queueGeneration !== this.commandQueueGeneration || this.intentionalUnpair) return;
         if (this.charCmd) {
           const elapsedSinceLastWrite = Date.now() - this.lastCommandWriteAt;
@@ -1216,6 +1292,7 @@ class BLEService {
             await wait(COMMAND_WRITE_GAP_MS - elapsedSinceLastWrite);
           }
 
+          if (this.otaToken) throw new Error('Firmware update starting; queued device command cancelled.');
           if (queueGeneration !== this.commandQueueGeneration || this.intentionalUnpair) return;
 
           await operation();
@@ -1231,6 +1308,7 @@ class BLEService {
   }
 
   async requestFileTransfer(): Promise<void> {
+    if (this.otaToken) throw new Error('Firmware update in progress; batch file transfers are paused.');
     if (!this.device || !this.device.gatt?.connected) {
         throw new Error('Device not connected');
     }

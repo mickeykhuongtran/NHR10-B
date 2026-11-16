@@ -1,5 +1,5 @@
 
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error' | 'updating';
 
 export type ScanMode = 'interactive' | 'batch';
 
